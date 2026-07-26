@@ -420,10 +420,10 @@ void Dispatcher::dispatch(Device & d) {
 	cl_event eventInverse;
 	cl_event eventIterate;
 
-	enqueueKernelDevice(d, d.m_kernelInverse, m_size / m_inverseSize, &eventInverse);
+	enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / PROFANITY_INVERSE_STRIP, PROFANITY_INVERSE_GROUP, &eventInverse);
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size, &eventIterate);
 #else
-	enqueueKernelDevice(d, d.m_kernelInverse, m_size / m_inverseSize);
+	enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / PROFANITY_INVERSE_STRIP, PROFANITY_INVERSE_GROUP);
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size);
 #endif
 

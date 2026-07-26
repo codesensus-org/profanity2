@@ -20,6 +20,8 @@
 
 #define PROFANITY_SPEEDSAMPLES 20
 #define PROFANITY_MAX_SCORE 40
+#define PROFANITY_INVERSE_STRIP 8
+#define PROFANITY_INVERSE_GROUP 128
 
 class Dispatcher {
 	private:

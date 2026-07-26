@@ -516,43 +516,72 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 // It's an implementation of Algorithm 2.11 from Modern Computer Arithmetic:
 // https://members.loria.fr/PZimmermann/mca/pub226.html 
 //
-// My RX 480 is very sensitive to changes in the second loop and sometimes I have
-// to make seemingly non-functional changes to the code to make the compiler
-// generate the most optimized version.
+// A work item multiplies PROFANITY_INVERSE_STRIP points into prefix products it
+// holds in registers. Prefix and suffix scans across the work group's strip
+// products then leave each item the product of every strip but its own, so a
+// single inverse serves all PROFANITY_INVERSE_STRIP * PROFANITY_INVERSE_GROUP
+// points, which is worth arranging: an inverse costs on the order of 190 modular
+// multiplications.
+__attribute__((reqd_work_group_size(PROFANITY_INVERSE_GROUP, 1, 1)))
 __kernel void profanity_inverse(__global const mp_number * const pDeltaX, __global mp_number * const pInverse) {
-	const size_t id = get_global_id(0) * PROFANITY_INVERSE_SIZE;
+	const uint lid = get_local_id(0);
+	// Strided by the group, so the items of a group read adjacent addresses.
+	const size_t id = get_group_id(0) * (size_t)(PROFANITY_INVERSE_GROUP * PROFANITY_INVERSE_STRIP) + lid;
 
 	// negativeDoubleGy = 0x6f8a4b11b2b8773544b60807e3ddeeae05d0976eb2f557ccc7705edf09de52bf
 	mp_number negativeDoubleGy = { {0x09de52bf, 0xc7705edf, 0xb2f557cc, 0x05d0976e, 0xe3ddeeae, 0x44b60807, 0xb2b87735, 0x6f8a4b11 } };
 
-	mp_number copy1, copy2;
-	mp_number buffer[PROFANITY_INVERSE_SIZE];
-	mp_number buffer2[PROFANITY_INVERSE_SIZE];
+	mp_number copy1, copy2, other;
+	mp_number buffer[PROFANITY_INVERSE_STRIP];
+	__local mp_number prefix[PROFANITY_INVERSE_GROUP], suffix[PROFANITY_INVERSE_GROUP], groupInverse;
 
-	// We initialize buffer and buffer2 such that:
-	// buffer[i] = pDeltaX[id] * pDeltaX[id + 1] * pDeltaX[id + 2] * ... * pDeltaX[id + i]
-	// buffer2[i] = pDeltaX[id + i]
+	// buffer[i] = pDeltaX[id] * pDeltaX[id + G] * ... * pDeltaX[id + i * G].
+	// Unrolled, or the indices stay dynamic and the array stays out of registers.
 	buffer[0] = pDeltaX[id];
-	for (uint i = 1; i < PROFANITY_INVERSE_SIZE; ++i) {
-		buffer2[i] = pDeltaX[id + i];
-		mp_mod_mul(&buffer[i], &buffer2[i], &buffer[i - 1]);
+	#pragma unroll
+	for (uint i = 1; i < PROFANITY_INVERSE_STRIP; ++i) {
+		other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP];
+		mp_mod_mul(&buffer[i], &other, &buffer[i - 1]);
 	}
 
-	// Take the inverse of all x-values combined
-	copy1 = buffer[PROFANITY_INVERSE_SIZE - 1];
-	mp_mod_inverse(&copy1);
+	prefix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1];
+	suffix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1];
+	barrier(CLK_LOCAL_MEM_FENCE);
 
-	// We multiply in -2G_y together with the inverse so that we have:
+	for (uint d = 1; d < PROFANITY_INVERSE_GROUP; d <<= 1) {
+		copy1 = prefix[lid];
+		copy2 = suffix[lid];
+		if (lid >= d) { other = prefix[lid - d]; mp_mod_mul(&copy1, &copy1, &other); }
+		if (lid + d < PROFANITY_INVERSE_GROUP) { other = suffix[lid + d]; mp_mod_mul(&copy2, &copy2, &other); }
+		barrier(CLK_LOCAL_MEM_FENCE);
+		prefix[lid] = copy1;
+		suffix[lid] = copy2;
+		barrier(CLK_LOCAL_MEM_FENCE);
+	}
+
+	// Take the inverse of all x-values combined, with -2G_y multiplied in so that
 	//            - 2 * G_y
 	//  ----------------------------
 	//  x_0 * x_1 * x_2 * x_3 * ...
-	mp_mod_mul(&copy1, &copy1, &negativeDoubleGy);
+	if (lid == 0) {
+		copy1 = prefix[PROFANITY_INVERSE_GROUP - 1];
+		mp_mod_inverse(&copy1);
+		mp_mod_mul(&copy1, &copy1, &negativeDoubleGy);
+		groupInverse = copy1;
+	}
+	barrier(CLK_LOCAL_MEM_FENCE);
 
-	// Multiply out each individual inverse using the buffers
-	for (uint i = PROFANITY_INVERSE_SIZE - 1; i > 0; --i) {
+	copy1 = groupInverse;
+	if (lid > 0) { other = prefix[lid - 1]; mp_mod_mul(&copy1, &copy1, &other); }
+	if (lid + 1 < PROFANITY_INVERSE_GROUP) { other = suffix[lid + 1]; mp_mod_mul(&copy1, &copy1, &other); }
+
+	// Multiply out each individual inverse using the buffer
+	#pragma unroll
+	for (uint i = PROFANITY_INVERSE_STRIP - 1; i > 0; --i) {
 		mp_mod_mul(&copy2, &copy1, &buffer[i - 1]);
-		mp_mod_mul(&copy1, &copy1, &buffer2[i]);
-		pInverse[id + i] = copy2;
+		other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP];
+		pInverse[id + i * PROFANITY_INVERSE_GROUP] = copy2;
+		mp_mod_mul(&copy1, &copy1, &other);
 	}
 
 	pInverse[id] = copy1;
