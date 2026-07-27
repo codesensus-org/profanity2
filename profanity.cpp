@@ -160,9 +160,9 @@ bool printResult(const cl_int err) {
 	return err != CL_SUCCESS;
 }
 
-std::string getDeviceCacheFilename(cl_device_id & d, const size_t & inverseSize) {
+std::string getDeviceCacheFilename(cl_device_id & d, const size_t & inverseSize, const size_t & inverseStrip, const size_t & inverseGroup) {
 	const auto uniqueId = getUniqueDeviceIdentifier(d);
-	return "cache-opencl." + toString(inverseSize) + "." + toString(uniqueId);
+	return "cache-opencl." + toString(inverseSize) + "." + toString(inverseStrip) + "." + toString(inverseGroup) + "." + toString(uniqueId);
 }
 
 int main(int argc, char * * argv) {
@@ -195,6 +195,8 @@ int main(int argc, char * * argv) {
 		bool bNoCache = false;
 		size_t inverseSize = 255;
 		size_t inverseMultiple = 16384;
+		size_t inverseStrip = 0;
+		size_t inverseGroup = 0;
 		bool bMineContract = false;
 
 		argp.addSwitch('h', "help", bHelp);
@@ -216,6 +218,8 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('n', "no-cache", bNoCache);
 		argp.addSwitch('i', "inverse-size", inverseSize);
 		argp.addSwitch('I', "inverse-multiple", inverseMultiple);
+		argp.addSwitch('S', "inverse-strip", inverseStrip);
+		argp.addSwitch('G', "inverse-group", inverseGroup);
 		argp.addSwitch('c', "contract", bMineContract);
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
@@ -229,6 +233,26 @@ int main(int argc, char * * argv) {
 		if (bHelp) {
 			std::cout << g_strHelp << std::endl;
 			return 0;
+		}
+
+		if ((inverseStrip == 0) != (inverseGroup == 0)) {
+			std::cout << "error: --inverse-strip and --inverse-group must both be zero (disabled) or both be non-zero" << std::endl;
+			return 1;
+		}
+
+		if (inverseStrip != 0) {
+			const size_t size = inverseSize * inverseMultiple;
+
+			if ((inverseGroup & (inverseGroup - 1)) != 0) {
+				std::cout << "error: --inverse-group must be a power of two, got " << inverseGroup << std::endl;
+				return 1;
+			}
+
+			if (size % (inverseStrip * inverseGroup) != 0) {
+				std::cout << "error: --inverse-size * --inverse-multiple (" << size << ") must be a multiple of "
+					<< "--inverse-strip * --inverse-group (" << inverseStrip * inverseGroup << ")" << std::endl;
+				return 1;
+			}
 		}
 
 		Mode mode = Mode::benchmark();
@@ -305,7 +329,7 @@ int main(int argc, char * * argv) {
 
 			// Check if there's a prebuilt binary for this device and load it
 			if(!bNoCache) {
-				std::ifstream fileIn(getDeviceCacheFilename(deviceId, inverseSize), std::ios::binary);
+				std::ifstream fileIn(getDeviceCacheFilename(deviceId, inverseSize, inverseStrip, inverseGroup), std::ios::binary);
 				if (fileIn.is_open()) {
 					vDeviceBinary.push_back(std::string((std::istreambuf_iterator<char>(fileIn)), std::istreambuf_iterator<char>()));
 					vDeviceBinarySize.push_back(vDeviceBinary.back().size());
@@ -363,7 +387,7 @@ int main(int argc, char * * argv) {
 		// Build the program
 		std::cout << "  Building program..." << std::flush;
 		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE)
-			+ " -D PROFANITY_INVERSE_STRIP=" + toString(PROFANITY_INVERSE_STRIP) + " -D PROFANITY_INVERSE_GROUP=" + toString(PROFANITY_INVERSE_GROUP);
+			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup);
 		if (printResult(clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL))) {
 #ifdef PROFANITY_DEBUG
 			std::cout << std::endl;
@@ -385,7 +409,7 @@ int main(int argc, char * * argv) {
 			std::cout << "  Saving program..." << std::flush;
 			auto binaries = getBinaries(clProgram);
 			for (size_t i = 0; i < binaries.size(); ++i) {
-				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], inverseSize), std::ios::binary);
+				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], inverseSize, inverseStrip, inverseGroup), std::ios::binary);
 				fileOut.write(binaries[i].data(), binaries[i].size());
 			}
 			std::cout << "OK" << std::endl;
@@ -393,7 +417,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, 0, strPublicKey);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, 0, strPublicKey);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}

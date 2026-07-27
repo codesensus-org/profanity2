@@ -514,8 +514,21 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 
 // This kernel calculates several modular inversions at once with just one inverse.
 // It's an implementation of Algorithm 2.11 from Modern Computer Arithmetic:
-// https://members.loria.fr/PZimmermann/mca/pub226.html 
-//
+// https://members.loria.fr/PZimmermann/mca/pub226.html
+
+#if PROFANITY_INVERSE_STRIP == 0 && PROFANITY_INVERSE_GROUP == 0
+// Single-level (default): invert 1 batch of PROFANITY_INVERSE_SIZE points.
+#define PROFANITY_TWO_LEVEL_INVERSE 0
+#elif PROFANITY_INVERSE_STRIP > 0 && PROFANITY_INVERSE_GROUP > 0
+// Two-level: batch PROFANITY_INVERSE_STRIP points, and share an inverse across
+// PROFANITY_INVERSE_GROUP strips. Slower on some GPUs, so is opt-in only.
+#define PROFANITY_TWO_LEVEL_INVERSE 1
+#else
+#error "PROFANITY_INVERSE_STRIP and PROFANITY_INVERSE_GROUP must both be 0 or both be non-zero"
+#endif
+
+#if PROFANITY_TWO_LEVEL_INVERSE
+
 // A work item multiplies PROFANITY_INVERSE_STRIP points into prefix products it
 // holds in registers. Prefix and suffix scans across the work group's strip
 // products then leave each item the product of every strip but its own, so a
@@ -586,6 +599,55 @@ __kernel void profanity_inverse(__global const mp_number * const pDeltaX, __glob
 
 	pInverse[id] = copy1;
 }
+
+#else /* !PROFANITY_TWO_LEVEL_INVERSE */
+
+// Single-level inverse: one work item handles a whole batch of
+// PROFANITY_INVERSE_SIZE points by itself, with no local memory and no barriers.
+//
+// My RX 480 is very sensitive to changes in the second loop and sometimes I have
+// to make seemingly non-functional changes to the code to make the compiler
+// generate the most optimized version.
+__kernel void profanity_inverse(__global const mp_number * const pDeltaX, __global mp_number * const pInverse) {
+	const size_t id = get_global_id(0) * PROFANITY_INVERSE_SIZE;
+
+	// negativeDoubleGy = 0x6f8a4b11b2b8773544b60807e3ddeeae05d0976eb2f557ccc7705edf09de52bf
+	mp_number negativeDoubleGy = { {0x09de52bf, 0xc7705edf, 0xb2f557cc, 0x05d0976e, 0xe3ddeeae, 0x44b60807, 0xb2b87735, 0x6f8a4b11 } };
+
+	mp_number copy1, copy2;
+	mp_number buffer[PROFANITY_INVERSE_SIZE];
+	mp_number buffer2[PROFANITY_INVERSE_SIZE];
+
+	// We initialize buffer and buffer2 such that:
+	// buffer[i] = pDeltaX[id] * pDeltaX[id + 1] * pDeltaX[id + 2] * ... * pDeltaX[id + i]
+	// buffer2[i] = pDeltaX[id + i]
+	buffer[0] = pDeltaX[id];
+	for (uint i = 1; i < PROFANITY_INVERSE_SIZE; ++i) {
+		buffer2[i] = pDeltaX[id + i];
+		mp_mod_mul(&buffer[i], &buffer2[i], &buffer[i - 1]);
+	}
+
+	// Take the inverse of all x-values combined
+	copy1 = buffer[PROFANITY_INVERSE_SIZE - 1];
+	mp_mod_inverse(&copy1);
+
+	// We multiply in -2G_y together with the inverse so that we have:
+	//            - 2 * G_y
+	//  ----------------------------
+	//  x_0 * x_1 * x_2 * x_3 * ...
+	mp_mod_mul(&copy1, &copy1, &negativeDoubleGy);
+
+	// Multiply out each individual inverse using the buffers
+	for (uint i = PROFANITY_INVERSE_SIZE - 1; i > 0; --i) {
+		mp_mod_mul(&copy2, &copy1, &buffer[i - 1]);
+		mp_mod_mul(&copy1, &copy1, &buffer2[i]);
+		pInverse[id + i] = copy2;
+	}
+
+	pInverse[id] = copy1;
+}
+
+#endif /* PROFANITY_TWO_LEVEL_INVERSE */
 
 static inline uchar profanity_byte(const uint * const address, const int i) {
 	return (uchar)(address[i >> 2] >> ((i & 3) << 3));

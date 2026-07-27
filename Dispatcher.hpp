@@ -20,8 +20,6 @@
 
 #define PROFANITY_SPEEDSAMPLES 20
 #define PROFANITY_MAX_SCORE 40
-#define PROFANITY_INVERSE_STRIP 8
-#define PROFANITY_INVERSE_GROUP 128
 
 class Dispatcher {
 	private:
@@ -79,7 +77,7 @@ class Dispatcher {
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
@@ -93,6 +91,7 @@ class Dispatcher {
 		void dispatch(Device & d);
 		void enqueueKernel(cl_command_queue & clQueue, cl_kernel & clKernel, size_t worksizeGlobal, const size_t worksizeLocal, cl_event * pEvent);
 		void enqueueKernelDevice(Device & d, cl_kernel & clKernel, size_t worksizeGlobal, cl_event * pEvent);
+		void enqueueInverse(Device & d, cl_event * pEvent);
 
 		void handleResult(Device & d);
 		void handleExactResult(Device & d);
@@ -113,6 +112,8 @@ class Dispatcher {
 		const Mode m_mode;
 		const size_t m_worksizeMax;
 		const size_t m_inverseSize;
+		const size_t m_inverseStrip;
+		const size_t m_inverseGroup;
 		const size_t m_size;
 		cl_uchar m_clScoreMax;
 		cl_uchar m_clScoreQuit;

@@ -213,12 +213,14 @@ Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
 	, m_worksizeMax(worksizeMax)
 	, m_inverseSize(inverseSize)
+	, m_inverseStrip(inverseStrip)
+	, m_inverseGroup(inverseGroup)
 	, m_size(inverseSize*inverseMultiple)
 	, m_clScoreMax(mode.score)
 	, m_clScoreQuit(clScoreQuit)
@@ -388,6 +390,14 @@ void Dispatcher::enqueueKernel(cl_command_queue & clQueue, cl_kernel & clKernel,
 	}
 }
 
+void Dispatcher::enqueueInverse(Device & d, cl_event * pEvent = NULL) {
+	if (m_inverseStrip == 0) {
+		enqueueKernelDevice(d, d.m_kernelInverse, m_size / m_inverseSize, pEvent);
+	} else {
+		enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / m_inverseStrip, m_inverseGroup, pEvent);
+	}
+}
+
 void Dispatcher::enqueueKernelDevice(Device & d, cl_kernel & clKernel, size_t worksizeGlobal, cl_event * pEvent = NULL) {
 	try {
 		enqueueKernel(d.m_clQueue, clKernel, worksizeGlobal, d.m_worksizeLocal, pEvent);
@@ -420,10 +430,10 @@ void Dispatcher::dispatch(Device & d) {
 	cl_event eventInverse;
 	cl_event eventIterate;
 
-	enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / PROFANITY_INVERSE_STRIP, PROFANITY_INVERSE_GROUP, &eventInverse);
+	enqueueInverse(d, &eventInverse);
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size, &eventIterate);
 #else
-	enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / PROFANITY_INVERSE_STRIP, PROFANITY_INVERSE_GROUP);
+	enqueueInverse(d);
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size);
 #endif
 

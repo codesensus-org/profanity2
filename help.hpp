@@ -49,6 +49,20 @@ usage: ./profanity2 [OPTIONS]
                             work item. [default = 255]
     -I, --inverse-multiple  Set how many above work items will run in
                             parallell. [default = 16384]
+    -S, --inverse-strip     Enable two-level inversion, with this many points
+                            batched per work item. [default = 0, disabled]
+    -G, --inverse-group     Work group size sharing a single inverse when
+                            two-level inversion is enabled. Must be a power of
+                            two. [default = 0, disabled]
+
+  Two-level inversion:
+    With -S and -G a work group cooperates on one modular inverse instead of
+    each work item doing its own, which is much faster on some GPUs and much
+    slower on others. Both switches must be given together, and
+    -i * -I must be a multiple of -S * -G. Benchmark before using it:
+      RTX 4090   -S 8 -G 128    +38% over the default
+      RTX 3060   -S 8 -G 128    -29% over the default
+      GTX 1070   -S 8 -G 128    -62% over the default
 
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
