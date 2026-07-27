@@ -56,6 +56,12 @@ usage: ./profanity2 [OPTIONS]
   Device control:
     -s, --skip <index>      Skip device given by index.
     -n, --no-cache          Don't load cached pre-compiled version of kernel.
+    -C, --cpu               Search on CPU devices instead of graphics cards,
+                            which needs a CPU OpenCL runtime such as PoCL
+                            installed. Orders of magnitude slower and meant for
+                            machines with no usable GPU, and for trying a search
+                            out before renting one; lower -I to keep start-up
+                            from taking minutes.
 
   Tweaking:
     -w, --work <size>       Set OpenCL local work size. [default = 64]

@@ -151,6 +151,12 @@ usage: ./profanity2 [OPTIONS]
   Device control:
     -s, --skip <index>      Skip device given by index.
     -n, --no-cache          Don't load cached pre-compiled version of kernel.
+    -C, --cpu               Search on CPU devices instead of graphics cards,
+                            which needs a CPU OpenCL runtime such as PoCL
+                            installed. Orders of magnitude slower and meant for
+                            machines with no usable GPU, and for trying a search
+                            out before renting one; lower -I to keep start-up
+                            from taking minutes.
 
   Tweaking:
     -w, --work <size>       Set OpenCL local work size. [default = 64]
@@ -192,6 +198,23 @@ usage: ./profanity2 [OPTIONS]
       program like any software might contain bugs and it does by design cut
       corners to improve overall performance.
 ```
+
+## Running without a GPU (`--cpu`)
+
+profanity2 looks for graphics cards and stops if it finds none. `--cpu` points it at CPU
+devices instead, which needs a CPU OpenCL runtime installed — [PoCL](http://portablecl.org) is
+the usual one:
+
+```bash
+sudo apt install -y pocl-opencl-icd     # Debian/Ubuntu
+
+# Start-up seeds -i * -I points before the first hash, so keep that small on a CPU
+./profanity2.x64 --cpu --matching dead --min-score 4 -i 255 -I 64 -z $PUBLIC_KEY
+```
+
+Expect it to be slower than a graphics card by a wide margin — this is for machines that have
+no usable GPU, for trying a search out before renting one, and for working on profanity2
+itself. It is not a way to mine an address you actually want.
 
 ## Usage examples
 

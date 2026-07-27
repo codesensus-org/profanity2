@@ -38,6 +38,8 @@ std::string readFile(const char * const szFilename)
 std::vector<cl_device_id> getAllDevices(cl_device_type deviceType = CL_DEVICE_TYPE_GPU) {
 	std::vector<cl_device_id> vDevices;
 
+	const char * const what = deviceType == CL_DEVICE_TYPE_CPU ? "CPU" : "GPU";
+
 	cl_uint platformIdCount = 0;
 	cl_int err = clGetPlatformIDs(0, NULL, &platformIdCount);
 	if (err != CL_SUCCESS || platformIdCount == 0) {
@@ -59,7 +61,7 @@ std::vector<cl_device_id> getAllDevices(cl_device_type deviceType = CL_DEVICE_TY
 		if (err != CL_SUCCESS || countDevice == 0) {
 			char platformName[256] = {0};
 			clGetPlatformInfo(*it, CL_PLATFORM_NAME, sizeof(platformName), platformName, NULL);
-			std::cerr << "warning: skipping OpenCL platform without usable GPU devices: "
+			std::cerr << "warning: skipping OpenCL platform with no usable " << what << " devices: "
 			          << platformName << ", err = " << err << std::endl;
 			continue;
 		}
@@ -69,7 +71,7 @@ std::vector<cl_device_id> getAllDevices(cl_device_type deviceType = CL_DEVICE_TY
 		if (err != CL_SUCCESS) {
 			char platformName[256] = {0};
 			clGetPlatformInfo(*it, CL_PLATFORM_NAME, sizeof(platformName), platformName, NULL);
-			std::cerr << "warning: failed to get GPU devices from platform: "
+			std::cerr << "warning: failed to get " << what << " devices from platform: "
 			          << platformName << ", err = " << err << std::endl;
 			continue;
 		}
@@ -137,19 +139,48 @@ std::vector<std::string> getBinaries(cl_program & clProgram) {
 	return vReturn;
 }
 
+// FNV-1a, for naming things that need to be told apart rather than kept secret:
+// which sources a compiled kernel came from, and which device it was compiled
+// for. Only that two different inputs are unlikely to land on the same name.
+uint64_t fingerprint(const std::string & s) {
+	uint64_t hash = 0xcbf29ce484222325ULL;
+
+	for (const char c : s) {
+		hash ^= (uint64_t)(unsigned char)c;
+		hash *= 0x100000001b3ULL;
+	}
+
+	return hash;
+}
+
 unsigned int getUniqueDeviceIdentifier(const cl_device_id & deviceId) {
+	// Where a device sits on the PCI bus is what tells it from its siblings, and
+	// both of the extensions that answer that are vendor ones: a CPU device has
+	// no such place, and a driver without the extension will not say. Neither
+	// call is checked by clGetWrapper, so what came back on a device that has
+	// neither used to be whatever was on the stack — a different answer each
+	// run, and the kernel cache is filed under this. That meant recompiling
+	// every start and leaving another cache file behind each time. The name is
+	// the fallback: dull, but the same tomorrow.
+	//
 	// Recent Khronos headers define CL_DEVICE_TOPOLOGY_AMD but dropped the
 	// cl_device_topology_amd struct and the TYPE_PCIE constant, hence the
 	// second condition.
 #if defined(CL_DEVICE_TOPOLOGY_AMD) && defined(CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD)
-	auto topology = clGetWrapper<cl_device_topology_amd>(clGetDeviceInfo, deviceId, CL_DEVICE_TOPOLOGY_AMD);
-	if (topology.raw.type == CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD) {
+	cl_device_topology_amd topology;
+	if (clGetDeviceInfo(deviceId, CL_DEVICE_TOPOLOGY_AMD, sizeof(topology), &topology, NULL) == CL_SUCCESS
+			&& topology.raw.type == CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD) {
 		return (topology.pcie.bus << 16) + (topology.pcie.device << 8) + topology.pcie.function;
 	}
 #endif
-	cl_int bus_id = clGetWrapper<cl_int>(clGetDeviceInfo, deviceId, CL_DEVICE_PCI_BUS_ID_NV);
-	cl_int slot_id = clGetWrapper<cl_int>(clGetDeviceInfo, deviceId, CL_DEVICE_PCI_SLOT_ID_NV);
-	return (bus_id << 16) + slot_id;
+	cl_int bus_id = 0;
+	cl_int slot_id = 0;
+	if (clGetDeviceInfo(deviceId, CL_DEVICE_PCI_BUS_ID_NV, sizeof(bus_id), &bus_id, NULL) == CL_SUCCESS
+			&& clGetDeviceInfo(deviceId, CL_DEVICE_PCI_SLOT_ID_NV, sizeof(slot_id), &slot_id, NULL) == CL_SUCCESS) {
+		return (bus_id << 16) + slot_id;
+	}
+
+	return (unsigned int) fingerprint(clGetWrapperString(clGetDeviceInfo, deviceId, CL_DEVICE_NAME));
 }
 
 template <typename T> bool printResult(const T & t, const cl_int & err) {
@@ -162,20 +193,6 @@ bool printResult(const cl_int err) {
 	return err != CL_SUCCESS;
 }
 
-// FNV-1a over whatever the compiled kernel was built out of. Nothing
-// cryptographic is wanted here — only that two different builds are unlikely to
-// land on the same name.
-uint64_t sourceFingerprint(const std::string & s) {
-	uint64_t hash = 0xcbf29ce484222325ULL;
-
-	for (const char c : s) {
-		hash ^= (uint64_t)(unsigned char)c;
-		hash *= 0x100000001b3ULL;
-	}
-
-	return hash;
-}
-
 // A compiled kernel is only interchangeable with the source and the build
 // options it came from, so both go into the name it is filed under. Keyed on the
 // device and the tuning alone — as this was — a cached binary outlives the
@@ -184,11 +201,11 @@ uint64_t sourceFingerprint(const std::string & s) {
 // compiled against the old meaning, and the search would run at full speed
 // scoring the wrong thing. A name that no longer matches simply misses, and the
 // kernel is compiled again, which is the whole cost of being wrong here.
-std::string getDeviceCacheFilename(cl_device_id & d, const uint64_t fingerprint) {
+std::string getDeviceCacheFilename(cl_device_id & d, const uint64_t kernelId) {
 	const auto uniqueId = getUniqueDeviceIdentifier(d);
 
 	std::ostringstream ss;
-	ss << std::hex << std::setfill('0') << std::setw(16) << fingerprint;
+	ss << std::hex << std::setfill('0') << std::setw(16) << kernelId;
 
 	return "cache-opencl." + ss.str() + "." + toString(uniqueId);
 }
@@ -220,6 +237,7 @@ int main(int argc, char * * argv) {
 		size_t worksizeLocal = 64;
 		size_t worksizeMax = 0; // Will be automatically determined later if not overriden by user
 		bool bNoCache = false;
+		bool bUseCpu = false;
 		size_t inverseSize = 255;
 		size_t inverseMultiple = 16384;
 		size_t inverseStrip = 0;
@@ -244,6 +262,7 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('w', "work", worksizeLocal);
 		argp.addSwitch('W', "work-max", worksizeMax);
 		argp.addSwitch('n', "no-cache", bNoCache);
+		argp.addSwitch('C', "cpu", bUseCpu);
 		argp.addSwitch('i', "inverse-size", inverseSize);
 		argp.addSwitch('I', "inverse-multiple", inverseMultiple);
 		argp.addSwitch('S', "inverse-strip", inverseStrip);
@@ -350,9 +369,15 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup)
 			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA);
 
-		const uint64_t fingerprint = sourceFingerprint(strKeccak + strVanity + strBuildOptions);
+		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
-		std::vector<cl_device_id> vFoundDevices = getAllDevices();
+		// A CPU device instead of the graphics cards, not as well as them: one
+		// would contribute a rounding error's worth of hashes to a run with a
+		// GPU in it while taking the cores that feed the GPU to do it.
+		const cl_device_type deviceType = bUseCpu ? CL_DEVICE_TYPE_CPU : CL_DEVICE_TYPE_GPU;
+		const char * const deviceLabel = bUseCpu ? "CPU" : "GPU";
+
+		std::vector<cl_device_id> vFoundDevices = getAllDevices(deviceType);
 		std::vector<cl_device_id> vDevices;
 		std::map<cl_device_id, size_t> mDeviceIndex;
 
@@ -377,7 +402,7 @@ int main(int argc, char * * argv) {
 
 			// Check if there's a prebuilt binary for this device and load it
 			if(!bNoCache) {
-				std::ifstream fileIn(getDeviceCacheFilename(deviceId, fingerprint), std::ios::binary);
+				std::ifstream fileIn(getDeviceCacheFilename(deviceId, kernelId), std::ios::binary);
 				if (fileIn.is_open()) {
 					vDeviceBinary.push_back(std::string((std::istreambuf_iterator<char>(fileIn)), std::istreambuf_iterator<char>()));
 					vDeviceBinarySize.push_back(vDeviceBinary.back().size());
@@ -385,12 +410,14 @@ int main(int argc, char * * argv) {
 				}
 			}
 
-			std::cout << "  GPU" << i << ": " << strName << ", " << globalMemSize << " bytes available, " << computeUnits << " compute units (precompiled = " << (precompiled ? "yes" : "no") << ")" << std::endl;
+			std::cout << "  " << deviceLabel << i << ": " << strName << ", " << globalMemSize << " bytes available, " << computeUnits << " compute units (precompiled = " << (precompiled ? "yes" : "no") << ")" << std::endl;
 			vDevices.push_back(vFoundDevices[i]);
 			mDeviceIndex[vFoundDevices[i]] = i;
 		}
 
 		if (vDevices.empty()) {
+			std::cout << "error: no OpenCL " << deviceLabel << " devices found"
+				<< (bUseCpu ? ". Is a CPU OpenCL runtime such as PoCL installed?" : ". Try --cpu to run on the processor instead.") << std::endl;
 			return 1;
 		}
 
@@ -453,7 +480,7 @@ int main(int argc, char * * argv) {
 			std::cout << "  Saving program..." << std::flush;
 			auto binaries = getBinaries(clProgram);
 			for (size_t i = 0; i < binaries.size(); ++i) {
-				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], fingerprint), std::ios::binary);
+				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], kernelId), std::ios::binary);
 				fileOut.write(binaries[i].data(), binaries[i].size());
 			}
 			std::cout << "OK" << std::endl;
