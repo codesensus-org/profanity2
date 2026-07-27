@@ -2,7 +2,9 @@
  * Tiny SHA3 implementation by Markku-Juhani O. Saarinen:
  *   https://github.com/mjosaarinen/tiny_sha3
  * Keccak implementation found in xptMiner-gpu @ Github:
- * https://github.com/llamasoft/xptMiner-gpu/blob/master/opencl/keccak.cl
+ *   https://github.com/llamasoft/xptMiner-gpu/blob/master/opencl/keccak.cl
+ * Optimization for Ethereum addresses by truncating the last round from 0age:
+ *   https://github.com/0age/create2crunch/blob/master/src/kernels/keccak256.cl
  */
 
 typedef union {
@@ -122,18 +124,50 @@ __constant ulong keccakf_rndc[24] = {
 	0x8000000000008080, 0x0000000080000001, 0x8000000080008008
 };
 
-// Barely a bottleneck. No need to tinker more.
+/* Keccak-f[1600] with the last round truncated to just the Ethereum address.
+ *
+ * WARNING: In the result, only h->d[3] through h->d[7] (the last 20 bytes)
+ * hold correct values. Every other word is left in an intermediate state.
+ */
 void sha3_keccakf(ethhash * const h)
 {
 	ulong * const st = (ulong * const)&h->q[0];
 	h->d[33] ^= 0x80000000;
 	ulong t0, t1, t2, t3, t4;
 
-	// Unrolling and removing PI stage gave negligable performance on GTX 1070.
-	for (int i = 0; i < 24; ++i) {
+	for (int i = 0; i < 23; ++i) {
 		THETA(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
 		RHOPI(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
 		KHI(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
 		IOTA(st[0], keccakf_rndc[i]);
+	}
+
+	// Round 24, partial
+	{
+		TH_ELT(t0, st[4], st[9], st[14], st[19], st[24], st[1], st[6], st[11], st[16], st[21]);
+		TH_ELT(t1, st[0], st[5], st[10], st[15], st[20], st[2], st[7], st[12], st[17], st[22]);
+		TH_ELT(t2, st[1], st[6], st[11], st[16], st[21], st[3], st[8], st[13], st[18], st[23]);
+		TH_ELT(t3, st[2], st[7], st[12], st[17], st[22], st[4], st[9], st[14], st[19], st[24]);
+		TH_ELT(t4, st[3], st[8], st[13], st[18], st[23], st[0], st[5], st[10], st[15], st[20]);
+
+		// Theta applied only to the five lanes Rho/Pi feeds into the Khi below
+		ulong s00 = st[0]  ^ t0;
+		ulong s11 = st[6]  ^ t1;
+		ulong s22 = st[12] ^ t2;
+		ulong s33 = st[18] ^ t3;
+		ulong s44 = st[24] ^ t4;
+
+		// Rho/Pi for those same lanes (s00 is never reassigned)
+		ulong s10 = rotate(s11, (ulong)44);
+		ulong s20 = rotate(s22, (ulong)43);
+		ulong s30 = rotate(s33, (ulong)21);
+		ulong s40 = rotate(s44, (ulong)14);
+
+		// Khi only for the three lanes that make up the address
+		st[1] = s10 ^ (~s20 & s30);
+		st[2] = s20 ^ (~s30 & s40);
+		st[3] = s30 ^ (~s40 & s00);
+
+		// Iota is dropped since it only touches s00
 	}
 }
