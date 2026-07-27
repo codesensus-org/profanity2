@@ -5,11 +5,16 @@
 # Usage:
 #   make
 #   ./test_correctness_pr49.x64 [num_random_cases]
+#   ./test_scoring.x64 [num_random_cases]
+#   ./bench_score_matching.x64 [items] [iterations]
 #   ./bench_mod_mul_pr49.x64 [global_size] [iterations] [repetitions]
+#
+# The ones that read profanity.cl look for it relative to the working directory,
+# so run them from the repository root: ./tests/test_scoring.x64
 
 CC=g++
 CDEFINES=
-EXECUTABLES=test_correctness_pr49.x64 bench_mod_mul_pr49.x64
+EXECUTABLES=test_correctness_pr49.x64 test_scoring.x64 bench_score_matching.x64 bench_mod_mul_pr49.x64
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -24,6 +29,13 @@ all: $(EXECUTABLES)
 
 test_correctness_pr49.x64: test_correctness_pr49.cpp testutil.hpp ../types.hpp
 	$(CC) $(CFLAGS) $(CDEFINES) test_correctness_pr49.cpp $(LDFLAGS) -o $@
+
+# Both link the real Mode, so how a mask is encoded is under test as well.
+test_scoring.x64: test_scoring.cpp testutil.hpp ../types.hpp ../Mode.hpp ../Mode.cpp
+	$(CC) $(CFLAGS) $(CDEFINES) test_scoring.cpp ../Mode.cpp $(LDFLAGS) -o $@
+
+bench_score_matching.x64: bench_score_matching.cpp testutil.hpp ../types.hpp ../Mode.hpp ../Mode.cpp
+	$(CC) $(CFLAGS) $(CDEFINES) bench_score_matching.cpp ../Mode.cpp $(LDFLAGS) -o $@
 
 bench_mod_mul_pr49.x64: bench_mod_mul_pr49.cpp testutil.hpp ../types.hpp
 	$(CC) $(CFLAGS) $(CDEFINES) bench_mod_mul_pr49.cpp $(LDFLAGS) -o $@
