@@ -823,17 +823,41 @@ static inline uchar profanity_written_nibble(const uint * const written, const i
 	return (uchar)((written[i >> 3] >> ((i & 7) << 2)) & 0xF);
 }
 
-void profanity_result_update(const size_t id, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax) {
-	if (score && score > scoreMax) {
-		uchar hasResult = atomic_inc(&pResult[score].found); // NOTE: If "too many" results are found it'll wrap around to 0 again and overwrite last result. Only relevant if global worksize exceeds MAX(uint).
+void profanity_result_update(const size_t id, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax, const uchar bAppend) {
+	if (!score || score <= scoreMax) {
+		return;
+	}
 
-		// Save only one result for each score, the first.
-		if (hasResult == 0) {
-			pResult[score].foundId = id;
+	if (bAppend) {
+		// With a score floor the bar never moves, so a round has no single best
+		// hash to keep — every one that cleared the bar is wanted, and they are
+		// appended rather than filed one per score. pResult[0].found counts
+		// them and the entries follow it; the host resets that counter before
+		// every launch, so the bounds check here also guarantees that no two
+		// work items ever write the same slot. The score travels in the entry's
+		// own counter, the slot index no longer standing for it.
+		const uint at = atomic_inc(&pResult[0].found);
+
+		if (at < PROFANITY_MAX_SCORE) {
+			pResult[at + 1].found = score;
+			pResult[at + 1].foundId = id;
 
 			for (int i = 0; i < 20; ++i) {
-				pResult[score].foundHash[i] = profanity_byte(address, i);
+				pResult[at + 1].foundHash[i] = profanity_byte(address, i);
 			}
+		}
+
+		return;
+	}
+
+	uchar hasResult = atomic_inc(&pResult[score].found); // NOTE: If "too many" results are found it'll wrap around to 0 again and overwrite last result. Only relevant if global worksize exceeds MAX(uint).
+
+	// Save only one result for each score, the first.
+	if (hasResult == 0) {
+		pResult[score].foundId = id;
+
+		for (int i = 0; i < 20; ++i) {
+			pResult[score].foundHash[i] = profanity_byte(address, i);
 		}
 	}
 }
@@ -848,52 +872,6 @@ static inline int profanity_score_fn_benchmark(const uint * const address, __con
 	}
 
 	return sum == 0;
-}
-
-// Reports every hash that matches the given mask (data1) and pattern (data2)
-// exactly, unlike the scoring kernels which report at most one hash per score.
-// It has no score to hand back, so it cannot go through PROFANITY_SCORE_KERNEL,
-// but it takes the same arguments so that the host can set them without caring
-// which kernel the mode selected. scoreMax is unused.
-//
-// pResult[0].found counts the matches found by this launch; matches are
-// appended at pResult[1..PROFANITY_MAX_SCORE] in arrival order. The host reads
-// the buffer and resets the counter to zero before every launch, so the bounds
-// check below also guarantees that no two work items ever write the same slot.
-// Matches beyond the buffer capacity are counted but not stored; the host
-// reports how many were dropped.
-__kernel void profanity_iterate_exact_match(
-		__global mp_number * const pDeltaX,
-		__global const mp_number * const pInverse,
-		__global mp_number * const pPrevLambda,
-		__global result * const pResult,
-		__constant const uchar * const data1,
-		__constant const uchar * const data2,
-		const uchar scoreMax,
-		const uchar bContract) {
-	const size_t id = get_global_id(0);
-	uint address[5];
-	profanity_iterate(pDeltaX, pInverse, pPrevLambda, id, bContract, address);
-
-	__constant const uint * const mask = (__constant const uint *)data1;
-	__constant const uint * const want = (__constant const uint *)data2;
-
-	for (int i = 0; i < 5; ++i) {
-		// Wildcard positions have zero mask bits in data1 and zero bits in
-		// data2, so they compare equal for any hash byte.
-		if ((address[i] & mask[i]) != want[i]) {
-			return;
-		}
-	}
-
-	const uint matchIndex = atomic_inc(&pResult[0].found);
-	if (matchIndex < PROFANITY_MAX_SCORE) {
-		pResult[matchIndex + 1].foundId = id;
-
-		for (int i = 0; i < 20; ++i) {
-			pResult[matchIndex + 1].foundHash[i] = profanity_byte(address, i);
-		}
-	}
 }
 
 // A mask shorter than the address floats: it is scored wherever it sits best,
@@ -1202,12 +1180,13 @@ __kernel void profanity_iterate_score_##NAME( \
 		__constant const uchar * const data1, \
 		__constant const uchar * const data2, \
 		const uchar scoreMax, \
+		const uchar bAppend, \
 		const uchar bContract) { \
 	const size_t id = get_global_id(0); \
 	uint address[5]; \
 	profanity_iterate(pDeltaX, pInverse, pPrevLambda, id, bContract, address); \
 	const int score = profanity_score_fn_##NAME(address, data1, data2); \
-	profanity_result_update(id, address, pResult, score, scoreMax); \
+	profanity_result_update(id, address, pResult, score, scoreMax, bAppend); \
 }
 
 PROFANITY_SCORE_KERNEL(benchmark)

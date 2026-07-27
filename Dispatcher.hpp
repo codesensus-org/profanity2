@@ -77,7 +77,7 @@ class Dispatcher {
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
@@ -94,7 +94,7 @@ class Dispatcher {
 		void enqueueInverse(Device & d, cl_event * pEvent);
 
 		void handleResult(Device & d);
-		void handleExactResult(Device & d);
+		void handleFloorResult(Device & d);
 		void randomizeSeed(Device & d);
 
 		void onEvent(cl_event event, cl_int status, Device & d);
@@ -116,7 +116,15 @@ class Dispatcher {
 		const size_t m_inverseGroup;
 		const size_t m_size;
 		cl_uchar m_clScoreMax;
+		const cl_uchar m_clScoreMin;
 		cl_uchar m_clScoreQuit;
+
+		// Whether the kernels append every hash that clears the bar, rather than
+		// keeping the best of a round. A score floor is the only thing that asks
+		// for it, but the buffer flags and the per-round counter reset both turn
+		// on it, so it is worth a name of its own.
+		const bool m_bAppend;
+		bool m_bWarnedFull;
 
 		std::vector<Device *> m_vDevices;
 

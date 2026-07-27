@@ -123,9 +123,18 @@ usage: ./profanity2 [OPTIONS]
                             it is written; a shorter one is looked for anywhere
                             in the address, so pad it out with wildcards to
                             anchor it.
-    -e, --exact <hex mask>  Print every hash matching the given mask exactly,
-                            not just the best one. Non-hex characters (e.g. X)
-                            are wildcards. Runs until interrupted.
+
+  Reporting:
+    -r, --min-score <score> Print every hash scoring this or better, for as
+                            long as the program runs. Without it only a hash
+                            that beats the best one so far is printed, and the
+                            bar rises as the search goes: stumble on something
+                            better than you asked for and every later address
+                            that merely satisfies the request goes unreported.
+                            Give this when you know what you want rather than
+                            wanting the best available. A mask scores one for
+                            each character it pins down, so --matching dead
+                            wants --min-score 4.
 
   Advanced modes:
     --contract              Instead of account address, score the contract
@@ -156,7 +165,7 @@ usage: ./profanity2 [OPTIONS]
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
-    ./profanity2 --exact 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --matching 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de --min-score 8 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -266,30 +275,43 @@ A pattern shorter than 40 characters may hold wildcards too, and floats as a who
 ./profanity2.x64 --matching c0XXde -z $PUBLIC_KEY
 ```
 
-Note: only results improving the best score so far are printed, so after a result matching
-all fixed positions is found nothing better can appear — stop the program with `Ctrl-C`.
-Keep in mind that every additional fixed character multiplies the expected search time by 16.
+Note: by default only results improving the best score so far are printed, so after a result
+matching all fixed positions is found nothing better can appear — stop the program with
+`Ctrl-C`, or see `--min-score` below to keep them coming. Keep in mind that every additional
+fixed character multiplies the expected search time by 16.
 
-### All exact matches (`-e`, `--exact`)
+### Every result at or above a score (`-r`, `--min-score`)
 
-`--exact` takes the same mask format as `--matching` (up to 40 characters, non-hex characters
-are wildcards) but skips the scoring system entirely: it prints **every** address that matches
-all fixed positions of the mask and keeps running until stopped with `Ctrl-C`. Use it when you
-want to collect several candidate addresses in one run instead of restarting `--matching` for
-each one:
+By default the bar rises as the search goes: each printed result becomes the new bar, and only
+something better is printed after it. That is what you want when you are after the best address
+the GPU can find, and wrong when you know what you are after — stumble on one address scoring
+better than you asked for and every later address that merely satisfies the request goes
+unreported, however many of them turn up.
+
+`--min-score` pins the bar where you put it. Every address scoring that or better is printed,
+for as long as the program runs, and nothing narrows the search. A mask scores one point for
+each character it pins down, so a four-character pattern wants `--min-score 4`:
 
 ```bash
 # Every address 0x1337...c0de found, not just the first one
-./profanity2.x64 --exact 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de -z $PUBLIC_KEY
+./profanity2.x64 --matching 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de --min-score 8 -z $PUBLIC_KEY
 
 # Every address with at least five leading zeros
-./profanity2.x64 --exact 00000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z $PUBLIC_KEY
+./profanity2.x64 --matching 00000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --min-score 5 -z $PUBLIC_KEY
+
+# Every address containing "dead" anywhere
+./profanity2.x64 --matching dead --min-score 4 -z $PUBLIC_KEY
+
+# Every address holding at least twelve 'a' characters
+./profanity2.x64 --range -m 10 -M 10 --min-score 12 -z $PUBLIC_KEY
 ```
 
-The first matches take longer to appear than with `--matching` (partial matches are not
-reported), and a very short mask can produce more matches per GPU round than the result
-buffer holds — the program prints a warning with the number of dropped matches if that
-happens.
+This is what you want when a filter of your own sits behind profanity2 — checking EIP-55
+capitalisation, say — and needs a steady supply of candidates rather than one address and
+silence. One round reports at most 40 addresses per GPU, which at the rate rounds complete is
+several hundred a second; if you ever see the warning that says some were dropped, the floor is
+low enough that what you asked for is not rare at all, and asking for something rarer is the
+answer rather than a bigger buffer.
 
 ### Character classes anywhere (`--zeros`, `--letters`, `--numbers`)
 

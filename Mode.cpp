@@ -82,43 +82,6 @@ Mode Mode::matching(const std::string strHex) {
 	return r;
 }
 
-// The exact kernel compares whole words of the hash against the mask, so it
-// wants the two nibbles of a byte packed into one entry — not the one entry per
-// nibble Mode::matching lays out. The two encodings are not interchangeable,
-// which is why this builds its own rather than borrowing that one.
-Mode Mode::exact(const std::string strHex) {
-	Mode r;
-	r.name = "exact";
-	r.kernel = "profanity_iterate_exact_match";
-
-	if (strHex.size() > 40) {
-		throw std::runtime_error("hex mask must be at most 40 characters, got " + std::to_string(strHex.size()));
-	}
-
-	std::fill( r.data1, r.data1 + sizeof(r.data1), cl_uchar(0) );
-	std::fill( r.data2, r.data2 + sizeof(r.data2), cl_uchar(0) );
-
-	auto index = 0;
-
-	for( size_t i = 0; i < strHex.size(); i += 2 ) {
-		const auto indexHi = hexValueNoException(strHex[i]);
-		const auto indexLo = i + 1 < strHex.size() ? hexValueNoException(strHex[i+1]) : std::string::npos;
-
-		const auto valHi = (indexHi == std::string::npos) ? 0 : indexHi << 4;
-		const auto valLo = (indexLo == std::string::npos) ? 0 : indexLo;
-
-		const auto maskHi = (indexHi == std::string::npos) ? 0 : 0xF << 4;
-		const auto maskLo = (indexLo == std::string::npos) ? 0 : 0xF;
-
-		r.data1[index] = maskHi | maskLo;
-		r.data2[index] = valHi | valLo;
-
-		++index;
-	}
-
-	return r;
-}
-
 Mode Mode::leading(const char charLeading) {
 
 	Mode r;

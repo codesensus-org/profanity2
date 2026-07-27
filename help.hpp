@@ -28,9 +28,18 @@ usage: ./profanity2 [OPTIONS]
                             it is written; a shorter one is looked for anywhere
                             in the address, so pad it out with wildcards to
                             anchor it.
-    -e, --exact <hex mask>  Print every hash matching the given mask exactly,
-                            not just the best one. Non-hex characters (e.g. X)
-                            are wildcards. Runs until interrupted.
+
+  Reporting:
+    -r, --min-score <score> Print every hash scoring this or better, for as
+                            long as the program runs. Without it only a hash
+                            that beats the best one so far is printed, and the
+                            bar rises as the search goes: stumble on something
+                            better than you asked for and every later address
+                            that merely satisfies the request goes unreported.
+                            Give this when you know what you want rather than
+                            wanting the best available. A mask scores one for
+                            each character it pins down, so --matching dead
+                            wants --min-score 4.
 
   Advanced modes:
     --contract              Instead of account address, score the contract
@@ -75,7 +84,7 @@ usage: ./profanity2 [OPTIONS]
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
-    ./profanity2 --exact 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --matching 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de --min-score 8 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG

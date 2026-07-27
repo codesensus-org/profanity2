@@ -100,11 +100,7 @@ static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score
 	const std::string strVT100ClearLine = "\33[2K\r";
 	std::cout << strVT100ClearLine << "  Time: " << std::setw(5) << seconds << "s";
 
-	// Exact mode has no scoring, every result is a full match
-	if (mode.name != "exact") {
-		std::cout << " Score: " << std::setw(2) << (int) score;
-	}
-
+	std::cout << " Score: " << std::setw(2) << (int) score;
 	std::cout << " Private: 0x" << strPrivate << ' ';
 
 	std::cout << mode.transformName();
@@ -184,7 +180,7 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_index(index),
 	m_clDeviceId(clDeviceId),
 	m_worksizeLocal(worksizeLocal),
-	m_clScoreMax(0),
+	m_clScoreMax(parent.m_clScoreMin > 0 ? parent.m_clScoreMin - 1 : 0),
 	m_clQueue(createQueue(clContext, clDeviceId) ),
 	m_kernelInit( createKernel(clProgram, "profanity_init") ),
 	m_kernelInverse(createKernel(clProgram, "profanity_inverse")),
@@ -193,9 +189,9 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_memPointsDeltaX(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
 	m_memInversedNegativeDoubleGy(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
 	m_memPrevLambda(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
-	// Exact mode resets the match counter in the result buffer from the host
+	// Appending resets the counter heading the result buffer from the host
 	// before every round, which CL_MEM_HOST_READ_ONLY would forbid.
-	m_memResult(clContext, m_clQueue, mode.name == "exact" ? CL_MEM_READ_WRITE : CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
+	m_memResult(clContext, m_clQueue, parent.m_bAppend ? CL_MEM_READ_WRITE : CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
 	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_clSeed(createSeed()),
@@ -213,7 +209,7 @@ Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
@@ -222,8 +218,11 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_inverseStrip(inverseStrip)
 	, m_inverseGroup(inverseGroup)
 	, m_size(inverseSize*inverseMultiple)
-	, m_clScoreMax(mode.score)
+	, m_clScoreMax(clScoreMin > 0 ? clScoreMin : mode.score)
+	, m_clScoreMin(clScoreMin)
 	, m_clScoreQuit(clScoreQuit)
+	, m_bAppend(clScoreMin > 0)
+	, m_bWarnedFull(false)
 	, m_eventFinished(NULL)
 	, m_countPrint(0)
 	, m_publicKeyX(fromHex(seedPublicKey.substr(0, 64)))
@@ -333,8 +332,9 @@ void Dispatcher::initBegin(Device & d) {
 	d.m_memData1.setKernelArg(d.m_kernelIterate, 4);
 	d.m_memData2.setKernelArg(d.m_kernelIterate, 5);
 
-	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 6, d.m_clScoreMax); // Updated in handleResult()
-	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 7, (cl_uchar) (m_mode.target == CONTRACT ? 1 : 0));
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 6, d.m_clScoreMax); // Updated in handleResult(), pinned under a floor
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 7, (cl_uchar) (m_bAppend ? 1 : 0));
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 8, (cl_uchar) (m_mode.target == CONTRACT ? 1 : 0));
 
 	// Seed device
 	initContinue(d);
@@ -418,9 +418,8 @@ void Dispatcher::dispatch(Device & d) {
 	cl_event event;
 	d.m_memResult.read(false, &event);
 
-	if (m_mode.name == "exact") {
-		// Reset the match counter before this round's kernel appends new
-		// results. The in-order queue guarantees this write executes after
+	if (m_bAppend) {
+		// Reset the counter before this round's kernel appends new results. The in-order queue guarantees this write executes after
 		// the read above has captured the previous round's results.
 		static const cl_uint zero = 0;
 		d.m_memResult.writeRegion(false, 0, sizeof(zero), &zero);
@@ -451,12 +450,18 @@ void Dispatcher::dispatch(Device & d) {
 	OpenCLException::throwIfError("failed to set custom callback", res);
 }
 
-// In exact mode the kernel appends every full match to the result buffer:
-// element [0] holds the number of matches found during the last round and
-// elements [1..PROFANITY_MAX_SCORE] hold the matches themselves. The counter
-// is reset before every round (see dispatch()), so everything in the buffer
-// is new and can be printed as-is.
-void Dispatcher::handleExactResult(Device & d) {
+// Under a score floor the kernel appends every hash that cleared it: element [0]
+// holds how many the last round found and the entries follow it, each carrying
+// its own score, the slot index no longer standing for it. The counter is reset
+// before every round (see dispatch()), so everything in the buffer is new.
+//
+// Nothing here raises the bar, which is the whole point of asking for a floor. A
+// run left to raise its own narrows to whatever it has already found: stumble on
+// one address scoring better than was asked for and every later address that
+// merely satisfies the request goes unreported, however many of them turn up.
+// That is right for a search looking for the best it can do, and wrong for one
+// that knows what it wants — which is what the floor says.
+void Dispatcher::handleFloorResult(Device & d) {
 	const cl_uint count = d.m_memResult[0].found;
 	if (count == 0) {
 		return;
@@ -465,19 +470,41 @@ void Dispatcher::handleExactResult(Device & d) {
 	const cl_uint stored = count < PROFANITY_MAX_SCORE ? count : PROFANITY_MAX_SCORE;
 
 	std::lock_guard<std::mutex> lock(m_mutex);
+
 	for (cl_uint i = 0; i < stored; ++i) {
-		printResult(d.m_clSeed, d.m_round, d.m_memResult[i + 1], 0, timeStart, m_mode);
+		result & r = d.m_memResult[i + 1];
+		const cl_uchar score = (cl_uchar) r.found;
+
+		if (m_clScoreQuit && score >= m_clScoreQuit) {
+			m_quit = true;
+		}
+
+		printResult(d.m_clSeed, d.m_round, r, score, timeStart, m_mode);
 	}
 
-	if (count > stored) {
+	// Said once and then only counted. A floor loose enough to overrun the
+	// buffer overruns it on every round of every device, and the warning
+	// repeated hundreds of times a second would bury the addresses it is
+	// warning about.
+	//
+	// Overrunning at all means the floor is far below what the search is worth
+	// running for: forty a round, at ten rounds a second on each device, is
+	// hundreds of addresses a second already satisfying the request. Whatever
+	// is being looked for at that rate would have been found long before the
+	// dropped ones mattered.
+	if (count > stored && !m_bWarnedFull) {
+		m_bWarnedFull = true;
+
 		const std::string strVT100ClearLine = "\33[2K\r";
-		std::cout << strVT100ClearLine << "  warning: " << (count - stored) << " additional matches were found this round but did not fit the result buffer (" << PROFANITY_MAX_SCORE << " entries); use a more specific mask" << std::endl;
+		std::cout << strVT100ClearLine << "  warning: a round found " << count << " hashes at or above --min-score but only "
+			<< PROFANITY_MAX_SCORE << " fit the result buffer, so the rest were dropped. They are arriving faster than "
+			<< "there is any use for; raise --min-score to ask for something rarer." << std::endl;
 	}
 }
 
 void Dispatcher::handleResult(Device & d) {
-	if (m_mode.name == "exact") {
-		handleExactResult(d);
+	if (m_bAppend) {
+		handleFloorResult(d);
 		return;
 	}
 

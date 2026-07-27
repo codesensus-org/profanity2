@@ -209,7 +209,6 @@ int main(int argc, char * * argv) {
 		bool bModeNumbers = false;
 		std::string strModeLeading;
 		std::string strModeMatching;
-		std::string strModeExact;
 		std::string strPublicKey;
 		bool bModeLeadingRange = false;
 		bool bModeRange = false;
@@ -226,6 +225,7 @@ int main(int argc, char * * argv) {
 		size_t inverseStrip = 0;
 		size_t inverseGroup = 0;
 		bool bMineContract = false;
+		int scoreMin = 0;
 
 		argp.addSwitch('h', "help", bHelp);
 		argp.addSwitch('0', "benchmark", bModeBenchmark);
@@ -251,7 +251,7 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('c', "contract", bMineContract);
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
-		argp.addSwitch('e', "exact", strModeExact);
+		argp.addSwitch('r', "min-score", scoreMin);
 
 		if (!argp.parse()) {
 			std::cout << "error: bad arguments, try again :<" << std::endl;
@@ -283,6 +283,11 @@ int main(int argc, char * * argv) {
 			}
 		}
 
+		if (scoreMin < 0 || scoreMin > PROFANITY_MAX_SCORE) {
+			std::cout << "error: --min-score must be between 1 and " << PROFANITY_MAX_SCORE << ", got " << scoreMin << std::endl;
+			return 1;
+		}
+
 		Mode mode = Mode::benchmark();
 		if (bModeBenchmark) {
 			mode = Mode::benchmark();
@@ -296,8 +301,6 @@ int main(int argc, char * * argv) {
 			mode = Mode::leading(strModeLeading.front());
 		} else if (!strModeMatching.empty()) {
 			mode = Mode::matching(strModeMatching);
-		} else if (!strModeExact.empty()) {
-			mode = Mode::exact(strModeExact);
 		} else if (bModeLeadingRange) {
 			mode = Mode::leadingRange(rangeMin, rangeMax);
 		} else if (bModeRange) {
@@ -331,6 +334,12 @@ int main(int argc, char * * argv) {
 			mode.target = ADDRESS;
 		}
 		std::cout << "Target: " << mode.transformName() << std:: endl;
+
+		if (scoreMin > 0) {
+			std::cout << "Reporting: every hash scoring " << scoreMin << " or more, for as long as this runs" << std::endl;
+		} else {
+			std::cout << "Reporting: each hash that beats the best so far (see --min-score)" << std::endl;
+		}
 
 		// Read before the devices are looked at rather than where the compiler
 		// needs them, because what a cached binary may be reused for is decided
@@ -452,7 +461,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, 0, strPublicKey);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}
