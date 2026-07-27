@@ -1,3 +1,4 @@
+#include <cctype>
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
@@ -210,6 +211,41 @@ std::string getDeviceCacheFilename(cl_device_id & d, const uint64_t kernelId) {
 	return "cache-opencl." + ss.str() + "." + toString(uniqueId);
 }
 
+// A hex argument as the exact number of bytes it has to spell, with the 0x an
+// address is usually written with allowed but not required. Nothing is written
+// unless the whole of it reads, so a rejected argument leaves no half of itself
+// behind for a later check to pass on.
+static bool parseHex(const std::string & strHex, cl_uchar * const out, const size_t count) {
+	const std::string s = (strHex.size() >= 2 && strHex[0] == '0' && (strHex[1] == 'x' || strHex[1] == 'X'))
+		? strHex.substr(2)
+		: strHex;
+
+	if (s.size() != count * 2) {
+		return false;
+	}
+
+	cl_uchar bytes[32];
+	if (count > sizeof(bytes)) {
+		return false;
+	}
+
+	static const std::string hex = "0123456789abcdef";
+
+	for (size_t i = 0; i < count; ++i) {
+		const auto indexHi = hex.find((char) std::tolower((unsigned char) s[i * 2]));
+		const auto indexLo = hex.find((char) std::tolower((unsigned char) s[i * 2 + 1]));
+
+		if (indexHi == std::string::npos || indexLo == std::string::npos) {
+			return false;
+		}
+
+		bytes[i] = (cl_uchar)((indexHi << 4) | indexLo);
+	}
+
+	std::copy(bytes, bytes + count, out);
+	return true;
+}
+
 int main(int argc, char * * argv) {
 	// THIS LINE WILL LEAD TO A COMPILE ERROR. THIS TOOL SHOULD NOT BE USED, SEE README.
 
@@ -243,6 +279,9 @@ int main(int argc, char * * argv) {
 		size_t inverseStrip = 0;
 		size_t inverseGroup = 0;
 		bool bMineContract = false;
+		std::string strFactory;
+		std::string strCaller;
+		std::string strInitCodeHash;
 		int scoreMin = 0;
 
 		argp.addSwitch('h', "help", bHelp);
@@ -268,6 +307,9 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('S', "inverse-strip", inverseStrip);
 		argp.addSwitch('G', "inverse-group", inverseGroup);
 		argp.addSwitch('c', "contract", bMineContract);
+		argp.addSwitch('x', "create2", strFactory);
+		argp.addSwitch('a', "caller", strCaller);
+		argp.addSwitch('k', "init-code-hash", strInitCodeHash);
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
 		argp.addSwitch('r', "min-score", scoreMin);
@@ -335,19 +377,65 @@ int main(int argc, char * * argv) {
 			return 0;
 		}
 		
-		if (strPublicKey.length() == 0) {
-			std::cout << "error: this tool requires your public key to derive it's private key security" << std::endl;
-			return 1;
-		}
+		const bool bMineCreate2 = !strFactory.empty();
 
-		if (strPublicKey.length() != 128) {
-			std::cout << "error: public key must be 128 hexademical characters long" << std::endl;
-			return 1;
+		create2 clCreate2;
+		std::fill((cl_uchar *) &clCreate2, (cl_uchar *) &clCreate2 + sizeof(clCreate2), cl_uchar(0));
+
+		if (bMineCreate2) {
+			if (bMineContract) {
+				std::cout << "error: --contract and --create2 are two different addresses to score, pick one" << std::endl;
+				return 1;
+			}
+
+			if (!parseHex(strFactory, clCreate2.factory, sizeof(clCreate2.factory))) {
+				std::cout << "error: --create2 takes the deploying contract's address, 40 hexadecimal characters" << std::endl;
+				return 1;
+			}
+
+			if (strInitCodeHash.empty()) {
+				std::cout << "error: --create2 needs --init-code-hash, the keccak256 of the init code being deployed" << std::endl;
+				return 1;
+			}
+
+			if (!parseHex(strInitCodeHash, clCreate2.initCodeHash, sizeof(clCreate2.initCodeHash))) {
+				std::cout << "error: --init-code-hash must be 64 hexadecimal characters" << std::endl;
+				return 1;
+			}
+
+			// Left out, the salt's first twenty bytes stay zero, which is what
+			// the factories that look at them take to mean anyone may deploy it.
+			if (!strCaller.empty() && !parseHex(strCaller, clCreate2.caller, sizeof(clCreate2.caller))) {
+				std::cout << "error: --caller takes an address, 40 hexadecimal characters" << std::endl;
+				return 1;
+			}
+		} else {
+			if (!strCaller.empty() || !strInitCodeHash.empty()) {
+				std::cout << "error: --caller and --init-code-hash say nothing without --create2" << std::endl;
+				return 1;
+			}
+
+			// A CREATE2 search has no key in it: what it varies is the salt,
+			// which is public, and the addresses it finds are contracts nobody
+			// holds a private key for. So there is nothing for a seed to keep
+			// safe and nothing to ask for, and outsourcing such a run is safe
+			// for the plainer reason that there is no secret to lose.
+			if (strPublicKey.length() == 0) {
+				std::cout << "error: this tool requires your public key to derive it's private key security" << std::endl;
+				return 1;
+			}
+
+			if (strPublicKey.length() != 128) {
+				std::cout << "error: public key must be 128 hexademical characters long" << std::endl;
+				return 1;
+			}
 		}
 
 		std::cout << "Mode: " << mode.name << std::endl;
 
-		if (bMineContract) {
+		if (bMineCreate2) {
+			mode.target = CREATE2;
+		} else if (bMineContract) {
 			mode.target = CONTRACT;
 		} else {
 			mode.target = ADDRESS;
@@ -367,7 +455,9 @@ int main(int argc, char * * argv) {
 		const std::string strVanity = readFile("profanity.cl");
 		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE)
 			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup)
-			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA);
+			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA)
+			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
+			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER);
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
@@ -488,7 +578,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}

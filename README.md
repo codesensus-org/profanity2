@@ -103,7 +103,9 @@ usage: ./profanity2 [OPTIONS]
 
   Mandatory args:
     -z                      Seed public key to start, add it's private key
-                            to the "profanity2" resulting private key.
+                            to the "profanity2" resulting private key. Not
+                            wanted by --create2, which searches over salts
+                            rather than over keys.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -144,6 +146,27 @@ usage: ./profanity2 [OPTIONS]
     --range                 Scores on hashes having characters within given
                             range anywhere.
 
+  CREATE2:
+    --create2 <address>     Score the address a contract deployed with CREATE2
+                            would land at, and search over salts rather than
+                            over keys. Takes the address of the contract doing
+                            the deploying. There is no private key anywhere in
+                            such a search — what it finds is a salt, so -z is
+                            neither wanted nor used, and there is nothing in
+                            the run to keep secret.
+    -k, --init-code-hash    The keccak256 of the init code being deployed, 64
+                            hexadecimal characters. Required with --create2.
+    -a, --caller <address>  Pin the salt's first 20 bytes to this address,
+                            which is what a factory guarding against front-
+                            running requires of whoever deploys through it.
+                            Left out, those bytes are zero — which is what the
+                            same factories take to mean anyone may deploy it.
+
+    The address scored is the last 20 bytes of
+      keccak256(0xff ++ create2 ++ salt ++ init-code-hash)
+    and the salt printed beside every result is the whole 32 bytes to deploy
+    with. Every scoring mode above works against it.
+
   Range:
     -m, --min <0-15>        Set range minimum (inclusive), 0 is '0' 15 is 'f'.
     -M, --max <0-15>        Set range maximum (inclusive), 0 is '0' 15 is 'f'.
@@ -165,6 +188,8 @@ usage: ./profanity2 [OPTIONS]
                             work item. [default = 255]
     -I, --inverse-multiple  Set how many above work items will run in
                             parallell. [default = 16384]
+                            A --create2 search inverts nothing, but -i * -I is
+                            still how many candidates a round covers.
 
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -177,6 +202,9 @@ usage: ./profanity2 [OPTIONS]
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --contract --leading 0 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --contract --zero-bytes -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH --zero-bytes
+    ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH \
+                 --caller YOUR_ADDRESS --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --min-score 4
 
   About:
     profanity2 is a vanity address generator for Ethereum that utilizes
@@ -393,6 +421,84 @@ zeroth transaction** of the found account instead of the account address itself:
 # Account whose first deployed contract address has the most zero bytes
 ./profanity2.x64 --contract --zero-bytes -z $PUBLIC_KEY
 ```
+
+### Vanity CREATE2 address (`--create2`)
+
+A contract deployed with CREATE2 lands at the last 20 bytes of
+
+```
+keccak256(0xff ++ factory ++ salt ++ keccak256(init_code))
+```
+
+and the salt is 32 bytes of the deployer's choosing. So there is no key to find
+here and nothing in the search to keep secret: `--create2` looks for a **salt**,
+`-z` is neither wanted nor used, and what it prints beside each address is the
+salt to deploy with. It needs the address of the contract doing the deploying
+and the hash of the init code being deployed:
+
+```bash
+export FACTORY="0x4e59b44847b379578588920ca78fbf26c0b4956c"
+export INIT_CODE_HASH="0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f"
+
+# The most zero bytes obtainable, which is what makes a contract cheap to call
+./profanity2.x64 --create2 $FACTORY --init-code-hash $INIT_CODE_HASH --zero-bytes
+```
+
+```
+  Time:     6s Score:  5 Salt: 0x0000…06c5f7ee Create2: 0x9489003920f95a00300000ec9621b93b8a5a007c
+```
+
+Every scoring mode above works against a CREATE2 address exactly as it does
+against an account's, `--min-score` included:
+
+```bash
+# 0xdead…
+./profanity2.x64 --create2 $FACTORY --init-code-hash $INIT_CODE_HASH \
+    --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --min-score 4
+```
+
+**`--caller`** pins the salt's first 20 bytes to an address. Factories that
+guard against front-running — [0age's
+`ImmutableCreate2Factory`](https://github.com/0age/metamorphic) among them —
+require exactly that of whoever deploys through them, so a salt found without it
+is one such a factory will refuse from you:
+
+```bash
+./profanity2.x64 --create2 $FACTORY --init-code-hash $INIT_CODE_HASH \
+    --caller 0xYOUR_ADDRESS --zero-bytes
+```
+
+Left out, those 20 bytes are zero, which is what the same factories take to mean
+that anyone may deploy it.
+
+The init code hash is of the **init code** — the constructor and its arguments,
+the bytes actually handed to CREATE2 — and not of the deployed runtime code.
+Get it wrong and the search runs at full speed on addresses that will never
+exist, so it is worth checking against a deployment you have already made.
+
+Verify a salt before you use it, which needs nothing but a keccak:
+
+```bash
+export SALT="0x…the 64 hex characters printed beside the address…"
+
+python3 - <<'EOF'
+import os
+from Crypto.Hash import keccak                       # pip install pycryptodome
+
+raw = lambda name: bytes.fromhex(os.environ[name].removeprefix("0x"))
+digest = keccak.new(
+    digest_bits=256,
+    data=b"\xff" + raw("FACTORY") + raw("SALT") + raw("INIT_CODE_HASH"),
+).digest()
+
+print("0x" + digest[12:].hex())
+EOF
+```
+
+This is the same search [create2crunch](https://github.com/0age/create2crunch)
+and [create2-vanity-miner](https://github.com/beincom/create2-vanity-miner) do,
+with profanity2's scoring modes over it: prefixes, suffixes, masks with
+wildcards, character counts and ranges, mirroring, and zero bytes.
 
 ### Benchmark and device control
 

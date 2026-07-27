@@ -35,7 +35,14 @@ else
 	endif
 endif
 
+HEADERS=ArgParser.hpp CLMemory.hpp create2.hpp Dispatcher.hpp help.hpp lexical_cast.hpp Mode.hpp precomp.hpp SpeedSample.hpp types.hpp
+
 all: $(SOURCES) $(EXECUTABLE)
+
+# Every object against every header. Coarse, and coarse is the right side to err
+# on: what the alternative gets wrong is a binary built from a header that has
+# changed since, which runs and is wrong rather than failing to build.
+$(OBJECTS): $(HEADERS)
 
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@

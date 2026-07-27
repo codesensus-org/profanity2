@@ -8,7 +8,9 @@ usage: ./profanity2 [OPTIONS]
 
   Mandatory args:
     -z                      Seed public key to start, add it's private key
-                            to the "profanity2" resulting private key.
+                            to the "profanity2" resulting private key. Not
+                            wanted by --create2, which searches over salts
+                            rather than over keys.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -49,6 +51,27 @@ usage: ./profanity2 [OPTIONS]
     --range                 Scores on hashes having characters within given
                             range anywhere.
 
+  CREATE2:
+    --create2 <address>     Score the address a contract deployed with CREATE2
+                            would land at, and search over salts rather than
+                            over keys. Takes the address of the contract doing
+                            the deploying. There is no private key anywhere in
+                            such a search — what it finds is a salt, so -z is
+                            neither wanted nor used, and there is nothing in
+                            the run to keep secret.
+    -k, --init-code-hash    The keccak256 of the init code being deployed, 64
+                            hexadecimal characters. Required with --create2.
+    -a, --caller <address>  Pin the salt's first 20 bytes to this address,
+                            which is what a factory guarding against front-
+                            running requires of whoever deploys through it.
+                            Left out, those bytes are zero — which is what the
+                            same factories take to mean anyone may deploy it.
+
+    The address scored is the last 20 bytes of
+      keccak256(0xff ++ create2 ++ salt ++ init-code-hash)
+    and the salt printed beside every result is the whole 32 bytes to deploy
+    with. Every scoring mode above works against it.
+
   Range:
     -m, --min <0-15>        Set range minimum (inclusive), 0 is '0' 15 is 'f'.
     -M, --max <0-15>        Set range maximum (inclusive), 0 is '0' 15 is 'f'.
@@ -70,6 +93,8 @@ usage: ./profanity2 [OPTIONS]
                             work item. [default = 255]
     -I, --inverse-multiple  Set how many above work items will run in
                             parallell. [default = 16384]
+                            A --create2 search inverts nothing, but -i * -I is
+                            still how many candidates a round covers.
     -S, --inverse-strip     Enable two-level inversion, with this many points
                             batched per work item. [default = 0, disabled]
     -G, --inverse-group     Work group size sharing a single inverse when
@@ -95,6 +120,9 @@ usage: ./profanity2 [OPTIONS]
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --contract --leading 0 -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH --zero-bytes
+    ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH \
+                 --caller YOUR_ADDRESS --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --min-score 4
 
   About:
     profanity2 is a vanity address generator for Ethereum that utilizes

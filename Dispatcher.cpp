@@ -61,6 +61,18 @@ static cl_ulong4 fromHex(const std::string & strHex) {
 	return res;
 }
 
+// The two halves of the seed public key. A CREATE2 search has no key anywhere
+// in it and is started without one, so an absent key is zero here rather than
+// an error: what would read it never runs.
+static cl_ulong4 fromHexKey(const std::string & strKey, const size_t at) {
+	if (strKey.size() < at + 64) {
+		const cl_ulong4 zero = { { 0, 0, 0, 0 } };
+		return zero;
+	}
+
+	return fromHex(strKey.substr(at, 64));
+}
+
 static std::string toHex(const uint8_t * const s, const size_t len) {
 	std::string b("0123456789abcdef");
 	std::string r;
@@ -75,11 +87,9 @@ static std::string toHex(const uint8_t * const s, const size_t len) {
 	return r;
 }
 
-static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score, const std::chrono::time_point<std::chrono::steady_clock> & timeStart, const Mode & mode) {
-	// Time delta
-	const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count();
-
-	// Format private key
+// The private key a result was found at: the seed this device started from,
+// advanced by the rounds behind it and by the work item that found it.
+static std::string privateKeyFor(cl_ulong4 seed, cl_ulong round, const result & r) {
 	cl_ulong carry = 0;
 	cl_ulong4 seedRes;
 
@@ -91,20 +101,36 @@ static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score
 	std::ostringstream ss;
 	ss << std::hex << std::setfill('0');
 	ss << std::setw(16) << seedRes.s[3] << std::setw(16) << seedRes.s[2] << std::setw(16) << seedRes.s[1] << std::setw(16) << seedRes.s[0];
-	const std::string strPrivate = ss.str();
 
-	// Format public key
-	const std::string strPublic = toHex(r.foundHash, 20);
+	return ss.str();
+}
+
+// The salt a result was found at: this device's, with the counter the kernel
+// wrote over its last eight bytes put back the same way round.
+static std::string saltFor(const cl_uchar * const salt, const cl_ulong counter) {
+	cl_uchar found[32];
+	std::copy(salt, salt + 32, found);
+	applyCreate2Counter(found, counter);
+
+	return toHex(found, 32);
+}
+
+// `what` names the thing the finder has to keep — the private key to add to
+// their seed, or the salt to deploy with — and is what the worker reads the
+// line for, so it is the same word on every line of a run.
+static void printResult(const std::string & what, const std::string & value, const result & r, const cl_uchar score, const std::chrono::time_point<std::chrono::steady_clock> & timeStart, const Mode & mode) {
+	// Time delta
+	const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count();
 
 	// Print
 	const std::string strVT100ClearLine = "\33[2K\r";
 	std::cout << strVT100ClearLine << "  Time: " << std::setw(5) << seconds << "s";
 
 	std::cout << " Score: " << std::setw(2) << (int) score;
-	std::cout << " Private: 0x" << strPrivate << ' ';
+	std::cout << ' ' << what << ": 0x" << value << ' ';
 
 	std::cout << mode.transformName();
-	std::cout << ": 0x" << strPublic << std::endl;
+	std::cout << ": 0x" << toHex(r.foundHash, 20) << std::endl;
 }
 
 unsigned int getKernelExecutionTimeMicros(cl_event & e) {
@@ -183,7 +209,7 @@ cl_ulong4 Dispatcher::Device::createSeed() {
 #endif
 }
 
-Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_program & clProgram, cl_device_id clDeviceId, const size_t worksizeLocal, const size_t size, const size_t index, const Mode & mode, cl_ulong4 clSeedX, cl_ulong4 clSeedY) :
+Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_program & clProgram, cl_device_id clDeviceId, const size_t worksizeLocal, const size_t size, const size_t index, const Mode & mode, cl_ulong4 clSeedX, cl_ulong4 clSeedY, const create2 & clCreate2) :
 	m_parent(parent),
 	m_index(index),
 	m_clDeviceId(clDeviceId),
@@ -193,33 +219,58 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_kernelInit( createKernel(clProgram, "profanity_init") ),
 	m_kernelInitUniform( createKernel(clProgram, "profanity_init_uniform") ),
 	m_kernelInverse(createKernel(clProgram, "profanity_inverse")),
-	m_kernelIterate(createKernel(clProgram, mode.kernel)),
+	m_kernelIterate(createKernel(clProgram, mode.kernelName())),
+	m_kernelCreate2Init(createKernel(clProgram, "profanity_create2_init")),
 	m_memPrecomp(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, sizeof(g_precomp), g_precomp),
-	m_memPointsDeltaX(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
-	m_memInversedNegativeDoubleGy(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
-	m_memPrevLambda(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
+	// The points a search keeps in flight are three quarters of a gigabyte
+	// apiece at the defaults and more than twice that as the worker tunes it.
+	// A CREATE2 search has no points at all, so it asks for a buffer that
+	// merely exists rather than one it will never read.
+	m_memPointsDeltaX(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
+	m_memInversedNegativeDoubleGy(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
+	m_memPrevLambda(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
 	// Appending resets the counter heading the result buffer from the host
 	// before every round, which CL_MEM_HOST_READ_ONLY would forbid.
 	m_memResult(clContext, m_clQueue, parent.m_bAppend ? CL_MEM_READ_WRITE : CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
 	m_memUniform(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, 1, true),
 	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
+	m_memCreate2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_CREATE2_WORDS),
 	m_clSeed(createSeed()),
 	m_clSeedX(clSeedX),
 	m_clSeedY(clSeedY),
 	m_round(0),
+	m_counterQueued(0),
+	m_counterFound(0),
 	m_speed(PROFANITY_SPEEDSAMPLES),
 	m_sizeInitialized(0),
 	m_eventFinished(NULL)
 {
+	// The salt this device searches from. The caller goes where a factory that
+	// guards against front-running looks for it, and the counter the kernel
+	// writes takes the last eight bytes. What is left between them is a nonce:
+	// every device counts its rounds from zero, so without one they would all
+	// grind through the same salts and several cards would be worth one.
+	//
+	// createSeed's randomness is enough for the same reason it is enough there
+	// — nothing here is secret, and a salt is public the moment it is used.
+	const cl_ulong4 nonce = createSeed();
 
+	std::fill(m_salt, m_salt + sizeof(m_salt), cl_uchar(0));
+	std::copy(clCreate2.caller, clCreate2.caller + 20, m_salt);
+
+	for (int i = 0; i < 4; ++i) {
+		m_salt[20 + i] = (cl_uchar)(nonce.s[0] >> (i * 8));
+	}
+
+	buildCreate2Template(m_memCreate2.data(), clCreate2, m_salt);
 }
 
 Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
@@ -235,8 +286,9 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_bWarnedFull(false)
 	, m_eventFinished(NULL)
 	, m_countPrint(0)
-	, m_publicKeyX(fromHex(seedPublicKey.substr(0, 64)))
-	, m_publicKeyY(fromHex(seedPublicKey.substr(64, 64)))
+	, m_publicKeyX(fromHexKey(seedPublicKey, 0))
+	, m_publicKeyY(fromHexKey(seedPublicKey, 64))
+	, m_create2(clCreate2)
 {
 }
 
@@ -245,7 +297,7 @@ Dispatcher::~Dispatcher() {
 }
 
 void Dispatcher::addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index) {
-	Device * pDevice = new Device(*this, m_clContext, m_clProgram, clDeviceId, worksizeLocal, m_size, index, m_mode, m_publicKeyX, m_publicKeyY);
+	Device * pDevice = new Device(*this, m_clContext, m_clProgram, clDeviceId, worksizeLocal, m_size, index, m_mode, m_publicKeyX, m_publicKeyY, m_create2);
 	m_vDevices.push_back(pDevice);
 }
 
@@ -262,10 +314,17 @@ void Dispatcher::run() {
 	m_countRunning = m_vDevices.size();
 
 	std::cout << "Running..." << std::endl;
-	std::cout << "  Always verify that a private key generated by this program corresponds to the" << std::endl;
-	std::cout << "  public key printed by importing it to a wallet of your choice. This program" << std::endl;
-	std::cout << "  like any software might contain bugs and it does by design cut corners to" << std::endl;
-	std::cout << "  improve overall performance." << std::endl;
+	if (m_mode.target == CREATE2) {
+		std::cout << "  Always verify that a salt printed here really does deploy to the address" << std::endl;
+		std::cout << "  beside it, by computing the CREATE2 address yourself from the factory, the" << std::endl;
+		std::cout << "  salt and the init code hash. This program like any software might contain" << std::endl;
+		std::cout << "  bugs and it does by design cut corners to improve overall performance." << std::endl;
+	} else {
+		std::cout << "  Always verify that a private key generated by this program corresponds to the" << std::endl;
+		std::cout << "  public key printed by importing it to a wallet of your choice. This program" << std::endl;
+		std::cout << "  like any software might contain bugs and it does by design cut corners to" << std::endl;
+		std::cout << "  improve overall performance." << std::endl;
+	}
 	std::cout << std::endl;
 
 	for (auto it = m_vDevices.begin(); it != m_vDevices.end(); ++it) {
@@ -279,11 +338,16 @@ void Dispatcher::run() {
 
 void Dispatcher::init() {
 	std::cout << "Initializing devices..." << std::endl;
-	std::cout << "  This should take less than a minute. The number of objects initialized on each" << std::endl;
-	std::cout << "  device is equal to inverse-size * inverse-multiple. To lower" << std::endl;
-	std::cout << "  initialization time (and memory footprint) I suggest lowering the" << std::endl;
-	std::cout << "  inverse-multiple first. You can do this via the -I switch. Do note that" << std::endl;
-	std::cout << "  this might negatively impact your performance." << std::endl;
+	if (m_mode.target == CREATE2) {
+		// Nothing to seed: a salt search starts wherever its counter is told to.
+		std::cout << "  A CREATE2 search has no points to seed, so this is immediate." << std::endl;
+	} else {
+		std::cout << "  This should take less than a minute. The number of objects initialized on each" << std::endl;
+		std::cout << "  device is equal to inverse-size * inverse-multiple. To lower" << std::endl;
+		std::cout << "  initialization time (and memory footprint) I suggest lowering the" << std::endl;
+		std::cout << "  inverse-multiple first. You can do this via the -I switch. Do note that" << std::endl;
+		std::cout << "  this might negatively impact your performance." << std::endl;
+	}
 	std::cout << std::endl;
 
 	const auto deviceCount = m_vDevices.size();
@@ -316,10 +380,16 @@ void Dispatcher::initBegin(Device & d) {
 		d.m_memData2[i] = m_mode.data2[i];
 	}
 
-	// Write precompute table and mode data
-	d.m_memPrecomp.write(true);
 	d.m_memData1.write(true);
 	d.m_memData2.write(true);
+
+	if (m_mode.target == CREATE2) {
+		initCreate2(d);
+		return;
+	}
+
+	// Write precompute table
+	d.m_memPrecomp.write(true);
 
 	// Kernel arguments - profanity_begin
 	d.m_memPrecomp.setKernelArg(d.m_kernelInit, 0);
@@ -359,6 +429,39 @@ void Dispatcher::initBegin(Device & d) {
 
 	// Seed device
 	initContinue(d);
+}
+
+// What initBegin does instead for a CREATE2 search, which is next to nothing:
+// the preimage every work item hashes, the arguments that do not change from
+// one round to the next, and a pass over the result buffer to start it at zero
+// — the one thing the seeding it replaces was also doing for it.
+void Dispatcher::initCreate2(Device & d) {
+	d.m_memCreate2.write(true);
+
+	d.m_memResult.setKernelArg(d.m_kernelCreate2Init, 0);
+
+	const size_t slots = PROFANITY_MAX_SCORE + 1;
+	OpenCLException::throwIfError("failed to enqueue the result buffer's clearing",
+		clEnqueueNDRangeKernel(d.m_clQueue, d.m_kernelCreate2Init, 1, NULL, &slots, NULL, 0, NULL, NULL));
+
+	// Kernel arguments - profanity_create2_score_*. The counter the round
+	// starts at is the one argument that moves, and dispatch() sets it.
+	d.m_memResult.setKernelArg(d.m_kernelIterate, 0);
+	d.m_memData1.setKernelArg(d.m_kernelIterate, 1);
+	d.m_memData2.setKernelArg(d.m_kernelIterate, 2);
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 3, d.m_clScoreMax); // Updated in handleResult(), pinned under a floor
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 4, (cl_uchar) (m_bAppend ? 1 : 0));
+	d.m_memCreate2.setKernelArg(d.m_kernelIterate, 5);
+
+	OpenCLException::throwIfError("failed to clear the result buffer", clFinish(d.m_clQueue));
+
+	const std::string strOutput = "  GPU" + toString(d.m_index) + " initialized";
+	std::cout << strOutput << std::endl;
+
+	d.m_sizeInitialized = m_size;
+	m_sizeInitDone += m_size;
+
+	clSetUserEventStatus(d.m_eventFinished, CL_COMPLETE);
 }
 
 void Dispatcher::initContinue(Device & d) {
@@ -446,14 +549,29 @@ void Dispatcher::dispatch(Device & d) {
 		d.m_memResult.writeRegion(false, 0, sizeof(zero), &zero);
 	}
 
+	if (m_mode.target == CREATE2) {
+		// The read above will bring back the round the previous call enqueued,
+		// so where that round's counter started has to be kept for it. Nothing
+		// has been enqueued before the first call and the buffer it reads is
+		// the cleared one, so what this holds then is never looked at.
+		d.m_counterFound = d.m_counterQueued;
+		d.m_counterQueued = d.m_round * m_size;
+
+		CLMemory<cl_ulong>::setKernelArg(d.m_kernelIterate, 6, d.m_counterQueued);
+	}
+
 #ifdef PROFANITY_DEBUG
 	cl_event eventInverse;
 	cl_event eventIterate;
 
-	enqueueInverse(d, &eventInverse);
+	if (m_mode.target != CREATE2) {
+		enqueueInverse(d, &eventInverse);
+	}
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size, &eventIterate);
 #else
-	enqueueInverse(d);
+	if (m_mode.target != CREATE2) {
+		enqueueInverse(d);
+	}
 	enqueueKernelDevice(d, d.m_kernelIterate, m_size);
 #endif
 
@@ -463,8 +581,12 @@ void Dispatcher::dispatch(Device & d) {
 	// We're actually not allowed to call clFinish here because this function is ultimately asynchronously called by OpenCL.
 	// However, this happens to work on my computer and it's not really intended for release, just something to aid me in
 	// optimizations.
-	clFinish(d.m_clQueue); 
-	std::cout << "Timing: profanity_inverse = " << getKernelExecutionTimeMicros(eventInverse) << "us, profanity_iterate = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
+	clFinish(d.m_clQueue);
+	if (m_mode.target == CREATE2) {
+		std::cout << "Timing: profanity_create2 = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
+	} else {
+		std::cout << "Timing: profanity_inverse = " << getKernelExecutionTimeMicros(eventInverse) << "us, profanity_iterate = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
+	}
 #endif
 
 	const auto res = clSetEventCallback(event, CL_COMPLETE, staticCallback, &d);
@@ -500,7 +622,7 @@ void Dispatcher::handleFloorResult(Device & d) {
 			m_quit = true;
 		}
 
-		printResult(d.m_clSeed, d.m_round, r, score, timeStart, m_mode);
+		report(d, r, score);
 	}
 
 	// Said once and then only counted. A floor loose enough to overrun the
@@ -523,6 +645,19 @@ void Dispatcher::handleFloorResult(Device & d) {
 	}
 }
 
+// What a finder is handed depends on what was searched: a scalar to add to the
+// private key behind their seed, or the salt to deploy with. Both are called
+// out by name on the line, so whatever reads it does not have to know which
+// search produced it before it can read it.
+void Dispatcher::report(Device & d, const result & r, const cl_uchar score) {
+	if (m_mode.target == CREATE2) {
+		printResult("Salt", saltFor(d.m_salt, d.m_counterFound + r.foundId), r, score, timeStart, m_mode);
+		return;
+	}
+
+	printResult("Private", privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
+}
+
 void Dispatcher::handleResult(Device & d) {
 	if (m_bAppend) {
 		handleFloorResult(d);
@@ -534,7 +669,10 @@ void Dispatcher::handleResult(Device & d) {
 
 		if (r.found > 0 && i >= d.m_clScoreMax) {
 			d.m_clScoreMax = i;
-			CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 6, d.m_clScoreMax);
+			// The bar the kernel throws away everything under. The two
+			// families of kernel take their arguments in different orders,
+			// having different numbers of them to take.
+			CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, m_mode.target == CREATE2 ? 3 : 6, d.m_clScoreMax);
 
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (i >= m_clScoreMax) {
@@ -544,7 +682,7 @@ void Dispatcher::handleResult(Device & d) {
 					m_quit = true;
 				}
 
-				printResult(d.m_clSeed, d.m_round, r, i, timeStart, m_mode);
+				report(d, r, i);
 			}
 
 			break;

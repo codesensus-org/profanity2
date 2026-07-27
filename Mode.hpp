@@ -16,6 +16,7 @@
 enum HashTarget {
 	ADDRESS,
 	CONTRACT,
+	CREATE2,
 	HASH_TARGET_COUNT
 };
 
@@ -39,11 +40,19 @@ class Mode {
 
 		std::string name;
 
-		std::string kernel;
+		// The scoring function this mode grades an address with, named as the
+		// kernels spell it — "matching", "leading", and so on. Which kernel
+		// actually runs it depends on where the address being graded comes
+		// from as well, so the name of one is built rather than stored: see
+		// kernelName().
+		std::string scorer;
 
 		HashTarget target;
 		// Address, Contract, ...
 		std::string transformName() const;
+
+		// The kernel that grades this mode against this target.
+		std::string kernelName() const;
 
 		cl_uchar data1[PROFANITY_MODE_DATA];
 		cl_uchar data2[PROFANITY_MODE_DATA];

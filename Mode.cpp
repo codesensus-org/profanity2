@@ -1,14 +1,14 @@
 #include "Mode.hpp"
 #include <stdexcept>
 
-Mode::Mode() : score(0) {
+Mode::Mode() : target(ADDRESS), score(0) {
 
 }
 
 Mode Mode::benchmark() {
 	Mode r;
 	r.name = "benchmark";
-	r.kernel = "profanity_iterate_score_benchmark";
+	r.scorer = "benchmark";
 	return r;
 }
 
@@ -40,7 +40,7 @@ static std::string::size_type hexValue(char c) {
 Mode Mode::matching(const std::string strHex) {
 	Mode r;
 	r.name = "matching";
-	r.kernel = "profanity_iterate_score_matching";
+	r.scorer = "matching";
 
 	if (strHex.size() > 40) {
 		throw std::runtime_error("hex mask must be at most 40 characters, got " + std::to_string(strHex.size()));
@@ -86,7 +86,7 @@ Mode Mode::leading(const char charLeading) {
 
 	Mode r;
 	r.name = "leading";
-	r.kernel = "profanity_iterate_score_leading";
+	r.scorer = "leading";
 	r.data1[0] = static_cast<cl_uchar>(hexValue(charLeading));
 	return r;
 }
@@ -98,7 +98,7 @@ Mode Mode::range(const cl_uchar min, const cl_uchar max) {
 	// whole address can be asked at once rather than character by character. A
 	// range spanning several has to be asked the slow way. --zeros comes through
 	// here as range(0, 0) and so takes the quick kernel too.
-	r.kernel = (min == max) ? "profanity_iterate_score_rangeequal" : "profanity_iterate_score_range";
+	r.scorer = (min == max) ? "rangeequal" : "range";
 	r.data1[0] = min;
 	r.data2[0] = max;
 	return r;
@@ -107,7 +107,7 @@ Mode Mode::range(const cl_uchar min, const cl_uchar max) {
 Mode Mode::zeroBytes() {
 	Mode r;
 	r.name = "zeroBytes";
-	r.kernel = "profanity_iterate_score_zerobytes";
+	r.scorer = "zerobytes";
 	return r;
 }
 
@@ -129,15 +129,30 @@ std::string Mode::transformName() const {
 			return "Address";
 		case CONTRACT:
 			return "Contract";
+		case CREATE2:
+			return "Create2";
 		default:
 			throw "No name for target";
 	}
 }
 
+// An account address and the contract it deploys at nonce zero come out of the
+// same point iteration and differ only in whether a second hash is taken, which
+// is a flag the one kernel reads. A CREATE2 address has no point arithmetic
+// behind it at all — the search runs over salts, and there is no key in it — so
+// it is a kernel of its own rather than another flag on that one.
+std::string Mode::kernelName() const {
+	const std::string prefix = (this->target == CREATE2)
+		? "profanity_create2_score_"
+		: "profanity_iterate_score_";
+
+	return prefix + this->scorer;
+}
+
 Mode Mode::leadingRange(const cl_uchar min, const cl_uchar max) {
 	Mode r;
 	r.name = "leadingrange";
-	r.kernel = "profanity_iterate_score_leadingrange";
+	r.scorer = "leadingrange";
 	r.data1[0] = min;
 	r.data2[0] = max;
 	return r;
@@ -146,13 +161,13 @@ Mode Mode::leadingRange(const cl_uchar min, const cl_uchar max) {
 Mode Mode::mirror() {
 	Mode r;
 	r.name = "mirror";
-	r.kernel = "profanity_iterate_score_mirror";
+	r.scorer = "mirror";
 	return r;
 }
 
 Mode Mode::doubles() {
 	Mode r;
 	r.name = "doubles";
-	r.kernel = "profanity_iterate_score_doubles";
+	r.scorer = "doubles";
 	return r;
 }

@@ -1226,3 +1226,80 @@ PROFANITY_SCORE_KERNEL(zerobytes)
 PROFANITY_SCORE_KERNEL(leadingrange)
 PROFANITY_SCORE_KERNEL(mirror)
 PROFANITY_SCORE_KERNEL(doubles)
+
+/* ------------------------------------------------------------------------ */
+/* CREATE2                                                                  */
+/* ------------------------------------------------------------------------ */
+// A contract deployed with CREATE2 lands at the last twenty bytes of
+//
+//     keccak256(0xff ++ factory ++ salt ++ keccak256(init_code))
+//
+// which is eighty-five bytes in, and nothing in it is a public key. So this
+// half of the program has no point arithmetic, no inverses and no seeding: the
+// search runs over salts, every one of which is as good as every other, and the
+// whole preimage but eight bytes of the salt stays put for the length of a run.
+// The host lays those eighty-five bytes out once — see buildCreate2Template —
+// and each work item copies them in and writes its own counter over the eight.
+//
+// Which eight is arbitrary and this takes the salt's last, leaving its first
+// twenty for the caller a permissioned factory demands and four behind that for
+// a nonce telling one device's search from another's. The counter goes in big
+// endian so that the salt on a printed line reads as a number counting upwards,
+// and because that is the order the host puts it back together in.
+// What profanity_init does for the result buffer, on its own, because the rest
+// of that kernel is the seeding a CREATE2 search has nothing to seed. Without a
+// score floor a slot is written only by the first work item to reach it and
+// read for as long as the run lasts, so it has to start at zero.
+__kernel void profanity_create2_init(__global result * const pResult) {
+	pResult[get_global_id(0)].found = 0;
+}
+
+inline void profanity_create2(__constant const uint * const pTemplate, const ulong counter, uint * const address) {
+	ethhash h = { { 0 } };
+
+	for (int i = 0; i < PROFANITY_CREATE2_WORDS; ++i) {
+		h.d[i] = pTemplate[i];
+	}
+
+	for (int i = 0; i < 8; ++i) {
+		h.b[PROFANITY_CREATE2_COUNTER + i] = (uchar)(counter >> ((7 - i) * 8));
+	}
+
+	sha3_keccakf(&h);
+
+	address[0] = h.d[3];
+	address[1] = h.d[4];
+	address[2] = h.d[5];
+	address[3] = h.d[6];
+	address[4] = h.d[7];
+}
+
+// One kernel per scoring mode again, over the salts of a round rather than over
+// points. The host hands each round the counter its first work item searches;
+// what any of them searched is that plus the work item's own index, which is
+// what pResult carries back for the salt to be put together again on the host.
+#define PROFANITY_CREATE2_KERNEL(NAME) \
+__kernel void profanity_create2_score_##NAME( \
+		__global result * const pResult, \
+		__constant const uchar * const data1, \
+		__constant const uchar * const data2, \
+		const uchar scoreMax, \
+		const uchar bAppend, \
+		__constant const uint * const pTemplate, \
+		const ulong counterBase) { \
+	const size_t id = get_global_id(0); \
+	uint address[5]; \
+	profanity_create2(pTemplate, counterBase + id, address); \
+	const int score = profanity_score_fn_##NAME(address, data1, data2); \
+	profanity_result_update(id, address, pResult, score, scoreMax, bAppend); \
+}
+
+PROFANITY_CREATE2_KERNEL(benchmark)
+PROFANITY_CREATE2_KERNEL(matching)
+PROFANITY_CREATE2_KERNEL(leading)
+PROFANITY_CREATE2_KERNEL(range)
+PROFANITY_CREATE2_KERNEL(rangeequal)
+PROFANITY_CREATE2_KERNEL(zerobytes)
+PROFANITY_CREATE2_KERNEL(leadingrange)
+PROFANITY_CREATE2_KERNEL(mirror)
+PROFANITY_CREATE2_KERNEL(doubles)

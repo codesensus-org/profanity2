@@ -15,6 +15,7 @@
 
 #include "SpeedSample.hpp"
 #include "CLMemory.hpp"
+#include "create2.hpp"
 #include "types.hpp"
 #include "Mode.hpp"
 
@@ -38,7 +39,7 @@ class Dispatcher {
 			static cl_kernel createKernel(cl_program & clProgram, const std::string s);
 			static cl_ulong4 createSeed();
 
-			Device(Dispatcher & parent, cl_context & clContext, cl_program & clProgram, cl_device_id clDeviceId, const size_t worksizeLocal, const size_t size, const size_t index, const Mode & mode, cl_ulong4 clSeedX, cl_ulong4 clSeedY);
+			Device(Dispatcher & parent, cl_context & clContext, cl_program & clProgram, cl_device_id clDeviceId, const size_t worksizeLocal, const size_t size, const size_t index, const Mode & mode, cl_ulong4 clSeedX, cl_ulong4 clSeedY, const create2 & clCreate2);
 			~Device();
 
 			Dispatcher & m_parent;
@@ -53,6 +54,7 @@ class Dispatcher {
 			cl_kernel m_kernelInitUniform;
 			cl_kernel m_kernelInverse;
 			cl_kernel m_kernelIterate;
+			cl_kernel m_kernelCreate2Init;
 
 			CLMemory<point> m_memPrecomp;
 			CLMemory<mp_number> m_memPointsDeltaX;
@@ -69,11 +71,29 @@ class Dispatcher {
 			CLMemory<cl_uchar> m_memData1;
 			CLMemory<cl_uchar> m_memData2;
 
+			// The CREATE2 preimage every work item hashes but for the eight
+			// bytes of salt it writes over, as the words the kernel copies in.
+			CLMemory<cl_uint> m_memCreate2;
+
 			// Seed and round information
 			cl_ulong4 m_clSeed;
 			cl_ulong4 m_clSeedX;
 			cl_ulong4 m_clSeedY;
 			cl_ulong m_round;
+
+			// The salt of a CREATE2 search, whose last eight bytes stand for
+			// whichever counter is being spoken about. The four before them are
+			// a nonce drawn per device: every device counts from zero, so it is
+			// the only thing keeping two of them off the same salts.
+			cl_uchar m_salt[32];
+
+			// Which counters a round searched. A round's results are not read
+			// back until the dispatch after the one that enqueued it, so where
+			// it started has to outlive the round: m_counterQueued is the round
+			// being enqueued now, m_counterFound the one whose results the read
+			// in flight will bring back.
+			cl_ulong m_counterQueued;
+			cl_ulong m_counterFound;
 
 			// Speed sampling
 			SpeedSample m_speed;
@@ -84,7 +104,7 @@ class Dispatcher {
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
@@ -94,6 +114,7 @@ class Dispatcher {
 		void init();
 		void initBegin(Device & d);
 		void initContinue(Device & d);
+		void initCreate2(Device & d);
 
 		void dispatch(Device & d);
 		void enqueueKernel(cl_command_queue & clQueue, cl_kernel & clKernel, size_t worksizeGlobal, const size_t worksizeLocal, cl_event * pEvent);
@@ -102,6 +123,7 @@ class Dispatcher {
 
 		void handleResult(Device & d);
 		void handleFloorResult(Device & d);
+		void report(Device & d, const result & r, const cl_uchar score);
 		void randomizeSeed(Device & d);
 
 		void onEvent(cl_event event, cl_int status, Device & d);
@@ -147,6 +169,7 @@ class Dispatcher {
 		bool m_quit;
 		cl_ulong4 m_publicKeyX;
 		cl_ulong4 m_publicKeyY;
+		const create2 m_create2;
 };
 
 #endif /* HPP_DISPATCHER */

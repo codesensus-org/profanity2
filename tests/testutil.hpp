@@ -26,16 +26,35 @@
 #include <string>
 #include <vector>
 
+#include "../create2.hpp"
 #include "../types.hpp"
+#include "../Mode.hpp"
 
 /* ------------------------------------------------------------------------ */
 /* OpenCL helpers                                                            */
 /* ------------------------------------------------------------------------ */
 
+#define PROFANITY_STRINGIFY2(x) #x
+#define PROFANITY_STRINGIFY(x) PROFANITY_STRINGIFY2(x)
+
+// How many slots the result buffer has, mirroring Dispatcher.hpp — the tests
+// drive the kernels directly and do not link the dispatcher, but the buffer
+// they hand over still has to be the size the kernels were built for.
+#define PROFANITY_TEST_MAX_SCORE 40
+
 // The value of PROFANITY_INVERSE_SIZE does not affect the mp_* math functions
 // under test; a small value keeps kernel compilation fast on CPU OpenCL
 // implementations like PoCL.
-static const char * const g_buildOptions = "-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_MAX_SCORE=40 -D PROFANITY_INVERSE_STRIP=8 -D PROFANITY_INVERSE_GROUP=128 -D PROFANITY_MODE_DATA=41";
+//
+// The CREATE2 layout is taken from the header the host builds its preimage
+// with rather than written out again, since the whole point of the test that
+// reads it is that the two agree.
+static const char * const g_buildOptions =
+	"-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_INVERSE_STRIP=8"
+	" -D PROFANITY_INVERSE_GROUP=128 -D PROFANITY_MODE_DATA=" PROFANITY_STRINGIFY(PROFANITY_MODE_DATA)
+	" -D PROFANITY_MAX_SCORE=" PROFANITY_STRINGIFY(PROFANITY_TEST_MAX_SCORE)
+	" -D PROFANITY_CREATE2_WORDS=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_WORDS)
+	" -D PROFANITY_CREATE2_COUNTER=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_COUNTER);
 
 inline void clCheck(const cl_int err, const char * const what) {
 	if (err != CL_SUCCESS) {
