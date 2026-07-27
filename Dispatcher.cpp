@@ -84,8 +84,8 @@ static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score
 	cl_ulong4 seedRes;
 
 	seedRes.s[0] = seed.s[0] + round; carry = seedRes.s[0] < round;
-	seedRes.s[1] = seed.s[1] + carry; carry = !seedRes.s[1];
-	seedRes.s[2] = seed.s[2] + carry; carry = !seedRes.s[2];
+	seedRes.s[1] = seed.s[1] + carry; carry = carry && !seedRes.s[1];
+	seedRes.s[2] = seed.s[2] + carry; carry = carry && !seedRes.s[2];
 	seedRes.s[3] = seed.s[3] + carry + r.foundId;
 
 	std::ostringstream ss;
@@ -171,6 +171,14 @@ cl_ulong4 Dispatcher::Device::createSeed() {
 	diff.s[1] = (((uint64_t)rd()) << 32) | rd();
 	diff.s[2] = (((uint64_t)rd()) << 32) | rd();
 	diff.s[3] = (((uint64_t)rd() & 0x0000ffff) << 32) | rd(); // zeroing 2 highest bytes to prevent overflowing sum private key after adding to seed private key
+
+	// profanity_init_uniform turns these three into the point every work item
+	// starts from, and there is no such point if they are all zero. One value out
+	// of 2^192 is worth excluding to let the seeding kernel assume it has one.
+	if (!(diff.s[0] | diff.s[1] | diff.s[2])) {
+		diff.s[0] = 1;
+	}
+
 	return diff;
 #endif
 }
@@ -183,6 +191,7 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_clScoreMax(parent.m_clScoreMin > 0 ? parent.m_clScoreMin - 1 : 0),
 	m_clQueue(createQueue(clContext, clDeviceId) ),
 	m_kernelInit( createKernel(clProgram, "profanity_init") ),
+	m_kernelInitUniform( createKernel(clProgram, "profanity_init_uniform") ),
 	m_kernelInverse(createKernel(clProgram, "profanity_inverse")),
 	m_kernelIterate(createKernel(clProgram, mode.kernel)),
 	m_memPrecomp(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, sizeof(g_precomp), g_precomp),
@@ -192,6 +201,7 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	// Appending resets the counter heading the result buffer from the host
 	// before every round, which CL_MEM_HOST_READ_ONLY would forbid.
 	m_memResult(clContext, m_clQueue, parent.m_bAppend ? CL_MEM_READ_WRITE : CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
+	m_memUniform(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, 1, true),
 	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_clSeed(createSeed()),
@@ -319,6 +329,17 @@ void Dispatcher::initBegin(Device & d) {
 	CLMemory<cl_ulong4>::setKernelArg(d.m_kernelInit, 4, d.m_clSeed);
 	CLMemory<cl_ulong4>::setKernelArg(d.m_kernelInit, 5, d.m_clSeedX);
 	CLMemory<cl_ulong4>::setKernelArg(d.m_kernelInit, 6, d.m_clSeedY);
+	d.m_memUniform.setKernelArg(d.m_kernelInit, 7);
+
+	// Kernel arguments - profanity_init_uniform, and the one launch of it. The
+	// queue is in order, so the seeding below reads what this leaves behind.
+	d.m_memPrecomp.setKernelArg(d.m_kernelInitUniform, 0);
+	d.m_memUniform.setKernelArg(d.m_kernelInitUniform, 1);
+	CLMemory<cl_ulong4>::setKernelArg(d.m_kernelInitUniform, 2, d.m_clSeed);
+
+	const size_t one = 1;
+	OpenCLException::throwIfError("failed to enqueue the shared starting point",
+		clEnqueueNDRangeKernel(d.m_clQueue, d.m_kernelInitUniform, 1, NULL, &one, NULL, 0, NULL, NULL));
 
 	// Kernel arguments - profanity_inverse
 	d.m_memPointsDeltaX.setKernelArg(d.m_kernelInverse, 0);

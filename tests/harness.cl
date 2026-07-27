@@ -275,6 +275,21 @@ __kernel void bench_keccak(__global uint * const out, const uint iterations) {
 	out[id] = h.d[0];
 }
 
+/* What a modular inversion costs against a modular multiplication, which is
+ * what decides whether batching inversions the way profanity_inverse does is
+ * worth restructuring anything for. */
+__kernel void bench_mod_inverse(__global mp_number * const X, const uint iterations) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+
+	for (uint i = 0; i < iterations; ++i) {
+		mp_mod_inverse(&x);
+		x.d[0] |= 1;
+	}
+
+	X[id] = x;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Benchmark kernels                                                        */
 /* ------------------------------------------------------------------------ */

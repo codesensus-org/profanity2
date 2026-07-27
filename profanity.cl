@@ -461,7 +461,27 @@ void profanity_init_seed(__global const point * const precomp, point * const p, 
 	}
 }
 
-__kernel void profanity_init(__global const point * const precomp, __global mp_number * const pDeltaX, __global mp_number * const pPrevLambda, __global result * const pResult, const ulong4 seed, const ulong4 seedX, const ulong4 seedY) {
+// The part of every work item's starting point that does not depend on the work
+// item. Only the top limb of the seed carries the index, so the other three
+// contribute the same point to all of them — three quarters of the scalar
+// multiplication below, repeated once per point in the search and thrown away
+// each time. Done once here, and read back out of pUniform by every work item.
+//
+// createSeed keeps those three limbs from all being zero, so there is always a
+// point here — the identity is not something the affine point_add can be handed,
+// and every work item below relies on starting from a real one.
+__kernel void profanity_init_uniform(__global const point * const precomp, __global point * const pUniform, const ulong4 seed) {
+	point p;
+	bool bIsFirst = true;
+
+	profanity_init_seed(precomp, &p, &bIsFirst, 8 * 255 * 0, seed.x);
+	profanity_init_seed(precomp, &p, &bIsFirst, 8 * 255 * 1, seed.y);
+	profanity_init_seed(precomp, &p, &bIsFirst, 8 * 255 * 2, seed.z);
+
+	*pUniform = p;
+}
+
+__kernel void profanity_init(__global const point * const precomp, __global mp_number * const pDeltaX, __global mp_number * const pPrevLambda, __global result * const pResult, const ulong4 seed, const ulong4 seedX, const ulong4 seedY, __global const point * const pUniform) {
 	const size_t id = get_global_id(0);
 	point p = {
 		.x = {.d = {
@@ -477,16 +497,19 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 			seedY.w & 0xFFFFFFFF, seedY.w >> 32,
 		}},
 	};
-	point p_random;
-	bool bIsFirst = true;
 
 	mp_number tmp1, tmp2;
 	point tmp3;
 
-	// Calculate k*G where k = seed.wzyx (in other words, find the point indicated by the private key represented in seed)
-	profanity_init_seed(precomp, &p_random, &bIsFirst, 8 * 255 * 0, seed.x);
-	profanity_init_seed(precomp, &p_random, &bIsFirst, 8 * 255 * 1, seed.y);
-	profanity_init_seed(precomp, &p_random, &bIsFirst, 8 * 255 * 2, seed.z);
+	// Calculate k*G where k = seed.wzyx (in other words, find the point indicated
+	// by the private key represented in seed). The low three limbs of the seed are
+	// the same for every work item and profanity_init_uniform did them once for
+	// all of them; only the top one, which carries the work item's index, is left
+	// to do here. createSeed keeps those three from all being zero, so there is
+	// always a point to start from.
+	point p_random = *pUniform;
+	bool bIsFirst = false;
+
 	profanity_init_seed(precomp, &p_random, &bIsFirst, 8 * 255 * 3, seed.w + id);
 	point_add(&p, &p, &p_random);
 
@@ -507,8 +530,13 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 	pDeltaX[id] = p.x;
 	pPrevLambda[id] = tmp1;
 
-	for (uchar i = 0; i < PROFANITY_MAX_SCORE + 1; ++i) {
-		pResult[i].found = 0;
+	// One entry each rather than the whole buffer each: every work item clearing
+	// all of it meant PROFANITY_MAX_SCORE writes per point to the same handful of
+	// addresses, which is millions of stores contending over one cache line for
+	// work that forty of them can do once. The seeding pass starts at zero, so
+	// these are the first work items to run.
+	if (id < PROFANITY_MAX_SCORE + 1) {
+		pResult[id].found = 0;
 	}
 }
 

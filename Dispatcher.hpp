@@ -21,6 +21,7 @@
 #define PROFANITY_SPEEDSAMPLES 20
 #define PROFANITY_MAX_SCORE 40
 
+
 class Dispatcher {
 	private:
 		class OpenCLException : public std::runtime_error {
@@ -49,6 +50,7 @@ class Dispatcher {
 			cl_command_queue m_clQueue;
 
 			cl_kernel m_kernelInit;
+			cl_kernel m_kernelInitUniform;
 			cl_kernel m_kernelInverse;
 			cl_kernel m_kernelIterate;
 
@@ -57,6 +59,11 @@ class Dispatcher {
 			CLMemory<mp_number> m_memInversedNegativeDoubleGy;
 			CLMemory<mp_number> m_memPrevLambda;
 			CLMemory<result> m_memResult;
+
+			// The starting point every work item shares. Written once by
+			// profanity_init_uniform and read by every profanity_init work item;
+			// the GPU is the only side that ever touches it.
+			CLMemory<point> m_memUniform;
 
 			// Data parameters used in some modes
 			CLMemory<cl_uchar> m_memData1;
