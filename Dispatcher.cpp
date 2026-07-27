@@ -196,8 +196,8 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	// Exact mode resets the match counter in the result buffer from the host
 	// before every round, which CL_MEM_HOST_READ_ONLY would forbid.
 	m_memResult(clContext, m_clQueue, mode.name == "exact" ? CL_MEM_READ_WRITE : CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
-	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, 20),
-	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, 20),
+	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
+	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, PROFANITY_MODE_DATA),
 	m_clSeed(createSeed()),
 	m_clSeedX(clSeedX),
 	m_clSeedY(clSeedY),
@@ -302,7 +302,7 @@ void Dispatcher::init() {
 
 void Dispatcher::initBegin(Device & d) {
 	// Set mode data
-	for (auto i = 0; i < 20; ++i) {
+	for (auto i = 0; i < PROFANITY_MODE_DATA; ++i) {
 		d.m_memData1[i] = m_mode.data1[i];
 		d.m_memData2[i] = m_mode.data2[i];
 	}

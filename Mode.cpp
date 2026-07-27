@@ -49,8 +49,57 @@ Mode Mode::matching(const std::string strHex) {
 	std::fill( r.data1, r.data1 + sizeof(r.data1), cl_uchar(0) );
 	std::fill( r.data2, r.data2 + sizeof(r.data2), cl_uchar(0) );
 
+	// The pinned nibbles alone, in the order they were written: data1 holds where
+	// in the mask each one sits and data2 holds what it is. Wildcards are left
+	// out rather than stored as gaps, so the kernel's inner loop is as long as
+	// the pattern the caller actually asked for and not as long as the mask they
+	// padded it into — which for an anchored search is most of 40 characters of
+	// nothing. The last entry of each array carries what the list itself cannot:
+	// how many pinned nibbles there are, and how long the mask was.
+	//
+	// The length is what decides where the mask may sit. One filling all 40
+	// characters has a single placement and stays where it is written; a shorter
+	// one is looked for at every offset it could sit at, so padding with
+	// wildcards is how a caller anchors a pattern. That distinction is why the
+	// length has to be kept even though the padding itself is dropped here.
+	cl_uchar pinned = 0;
+
+	for( size_t i = 0; i < strHex.size(); ++i ) {
+		const auto index = hexValueNoException(strHex[i]);
+
+		if (index == std::string::npos) {
+			continue;
+		}
+
+		r.data1[pinned] = static_cast<cl_uchar>(i);
+		r.data2[pinned] = static_cast<cl_uchar>(index);
+		++pinned;
+	}
+
+	r.data1[PROFANITY_MODE_DATA - 1] = pinned;
+	r.data2[PROFANITY_MODE_DATA - 1] = static_cast<cl_uchar>(strHex.size());
+
+	return r;
+}
+
+// The exact kernel compares whole words of the hash against the mask, so it
+// wants the two nibbles of a byte packed into one entry — not the one entry per
+// nibble Mode::matching lays out. The two encodings are not interchangeable,
+// which is why this builds its own rather than borrowing that one.
+Mode Mode::exact(const std::string strHex) {
+	Mode r;
+	r.name = "exact";
+	r.kernel = "profanity_iterate_exact_match";
+
+	if (strHex.size() > 40) {
+		throw std::runtime_error("hex mask must be at most 40 characters, got " + std::to_string(strHex.size()));
+	}
+
+	std::fill( r.data1, r.data1 + sizeof(r.data1), cl_uchar(0) );
+	std::fill( r.data2, r.data2 + sizeof(r.data2), cl_uchar(0) );
+
 	auto index = 0;
-	
+
 	for( size_t i = 0; i < strHex.size(); i += 2 ) {
 		const auto indexHi = hexValueNoException(strHex[i]);
 		const auto indexLo = i + 1 < strHex.size() ? hexValueNoException(strHex[i+1]) : std::string::npos;
@@ -70,13 +119,6 @@ Mode Mode::matching(const std::string strHex) {
 	return r;
 }
 
-Mode Mode::exact(const std::string strHex) {
-	Mode r = matching(strHex);
-	r.name = "exact";
-	r.kernel = "profanity_iterate_exact_match";
-	return r;
-}
-
 Mode Mode::leading(const char charLeading) {
 
 	Mode r;
@@ -89,7 +131,11 @@ Mode Mode::leading(const char charLeading) {
 Mode Mode::range(const cl_uchar min, const cl_uchar max) {
 	Mode r;
 	r.name = "range";
-	r.kernel = "profanity_iterate_score_range";
+	// A range of one character is a count of it, and counting is a question the
+	// whole address can be asked at once rather than character by character. A
+	// range spanning several has to be asked the slow way. --zeros comes through
+	// here as range(0, 0) and so takes the quick kernel too.
+	r.kernel = (min == max) ? "profanity_iterate_score_rangeequal" : "profanity_iterate_score_range";
 	r.data1[0] = min;
 	r.data2[0] = max;
 	return r;

@@ -9,6 +9,10 @@
 #include <CL/cl.h>
 #endif
 
+// What a mode hands the scoring kernel. Wide enough for one entry per address
+// nibble, plus the one that marks where a mask shorter than an address ends.
+#define PROFANITY_MODE_DATA 41
+
 enum HashTarget {
 	ADDRESS,
 	CONTRACT,
@@ -42,8 +46,8 @@ class Mode {
 		// Address, Contract, ...
 		std::string transformName() const;
 
-		cl_uchar data1[20];
-		cl_uchar data2[20];
+		cl_uchar data1[PROFANITY_MODE_DATA];
+		cl_uchar data2[PROFANITY_MODE_DATA];
 		cl_uchar score;
 };
 

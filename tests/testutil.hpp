@@ -35,7 +35,7 @@
 // The value of PROFANITY_INVERSE_SIZE does not affect the mp_* math functions
 // under test; a small value keeps kernel compilation fast on CPU OpenCL
 // implementations like PoCL.
-static const char * const g_buildOptions = "-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_MAX_SCORE=40 -D PROFANITY_INVERSE_STRIP=8 -D PROFANITY_INVERSE_GROUP=128";
+static const char * const g_buildOptions = "-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_MAX_SCORE=40 -D PROFANITY_INVERSE_STRIP=8 -D PROFANITY_INVERSE_GROUP=128 -D PROFANITY_MODE_DATA=41";
 
 inline void clCheck(const cl_int err, const char * const what) {
 	if (err != CL_SUCCESS) {

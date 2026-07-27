@@ -807,6 +807,22 @@ static inline void profanity_iterate(__global mp_number * const pDeltaX, __globa
 	}
 }
 
+// The i'th character of the address as it would be written out: the high nibble
+// of a byte comes first, so an even index takes the top half of byte i / 2.
+static inline uchar profanity_nibble(const uint * const address, const int i) {
+	const uchar byte = profanity_byte(address, i >> 1);
+	return (i & 1) ? (byte & 0x0F) : (byte >> 4);
+}
+
+// The same character, out of an address whose bytes have had their nibbles
+// swapped: that lines the characters up in the order they are written and puts
+// the i'th of them at bit 4i, which is a shift and a mask rather than the byte
+// extraction and half-selection above. See profanity_score_fn_matching for when
+// laying an address out that way pays for itself.
+static inline uchar profanity_written_nibble(const uint * const written, const int i) {
+	return (uchar)((written[i >> 3] >> ((i & 7) << 2)) & 0xF);
+}
+
 void profanity_result_update(const size_t id, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax) {
 	if (score && score > scoreMax) {
 		uchar hasResult = atomic_inc(&pResult[score].found); // NOTE: If "too many" results are found it'll wrap around to 0 again and overwrite last result. Only relevant if global worksize exceeds MAX(uint).
@@ -880,12 +896,109 @@ __kernel void profanity_iterate_exact_match(
 	}
 }
 
+// A mask shorter than the address floats: it is scored wherever it sits best,
+// which is what lets one search cover every offset a pattern could appear at. A
+// mask pinning all 40 nibbles has one placement and so stays anchored, padding
+// with wildcards being how a caller asks for that.
+//
+// Mode::matching hands over the pinned nibbles alone — data1 where each sits in
+// the mask, data2 what it is — with the count of them and the mask's length in
+// the last entry of each. Wildcards cost nothing here because they were never
+// stored: an anchored four character pattern is four steps of the inner loop
+// rather than the forty its padding would otherwise be walked through.
+//
+// The score is the pinned nibbles matched in one run from the start of the mask,
+// at whichever offset does best: a full match scores every nibble the mask pins
+// down and anything below that is progress towards one. Counting nibbles rather
+// than bytes is what keeps that ceiling the same at every offset — by bytes a
+// four nibble mask would span two of them at an even offset and three at an odd
+// one, and the host's rising bar, once an odd offset had reached three, would
+// shut every even one out for good.
 static inline int profanity_score_fn_matching(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
+	const int pinned = data1[PROFANITY_MODE_DATA - 1];
+	const int length = data2[PROFANITY_MODE_DATA - 1];
+
+	// A mask of nothing but wildcards can never score, and the peeled comparison
+	// below would read a first pinned character that is not there.
+	if (pinned == 0) {
+		return 0;
+	}
+
+	// A mask as long as an address has the one placement, so there is no scan to
+	// do and no offset to beat: walk its pinned characters once, straight out of
+	// the packed bytes. Laying the address out first, as the floating path below
+	// does, would cost more here than the handful of reads it would save.
+	if (length == 40) {
+		int run = 0;
+		while (run < pinned && profanity_nibble(address, data1[run]) == data2[run]) {
+			++run;
+		}
+
+		return run;
+	}
+
+	// A floating mask is looked for at up to 41 - length offsets, so the address
+	// is laid out in the order it is written first — three operations a word,
+	// and every character then sits at bit 4i, which is what the search below
+	// needs to be able to ask about all forty of them together.
+	uint written[5];
+	for (int i = 0; i < 5; ++i) {
+		written[i] = ((address[i] & 0x0F0F0F0Fu) << 4) | ((address[i] >> 4) & 0x0F0F0F0Fu);
+	}
+
+	const int firstAt = data1[0];
+	const uint firstIs = (uint)data2[0] * 0x11111111u;
+	const int lastAt = 40 - length;
+
+	// Fifteen offsets in sixteen have nothing wrong with them but the mask's
+	// first character, so rather than walk every offset to turn most of them
+	// away, this finds where that character actually occurs and tries only
+	// those. Exclusive-or it into all forty positions at once, fold each result
+	// down to whether anything was left over, and what remains marks the places
+	// worth looking at — two or three of them, against the thirty-odd an offset
+	// by offset scan would step through.
 	int score = 0;
 
-	for (int i = 0; i < 20; ++i) {
-		if (data1[i] > 0 && (profanity_byte(address, i) & data1[i]) == data2[i]) {
-			++score;
+	for (int i = 0; i < 5; ++i) {
+		uint x = written[i] ^ firstIs;
+
+		// Leave a 1 in the low bit of every character that differed, then invert
+		// to mark the ones that did not.
+		x |= x >> 2;
+		x |= x >> 1;
+
+		uint found = ~x & 0x11111111u;
+
+		while (found) {
+			const uint lowest = found & (~found + 1u);
+			found ^= lowest;
+
+			// How far up the word that bit sits, which is four times the
+			// character's place in it: the population count below one lone bit
+			// is its position, and OpenCL 1.2 has that where it has no count of
+			// trailing zeros.
+			const int character = (i << 3) + (int)(popcount(lowest - 1u) >> 2);
+			const int at = character - firstAt;
+
+			// The mask would hang off one end or the other from here.
+			if (at < 0 || at > lastAt) {
+				continue;
+			}
+
+			// The run is its own counter: it only ever advances on a match, so
+			// where it stops is both how far the loop got and what the offset
+			// scored. The first character is known to match, hence starting at
+			// one.
+			int run = 1;
+			while (run < pinned) {
+				if (profanity_written_nibble(written, at + data1[run]) != data2[run]) {
+					break;
+				}
+
+				++run;
+			}
+
+			score = max(score, run);
 		}
 	}
 
@@ -916,36 +1029,93 @@ static inline int profanity_score_fn_leading(const uint * const address, __const
 	return score;
 }
 
+// Counting the characters that fall within a range, asked of eight of them at a
+// time. Comparing characters where they sit is what a packed word will not let
+// you do — a borrow out of one would land in its neighbour — so each word is
+// split into the high nibbles of its bytes and the low ones, leaving every
+// character alone in a byte with four bits above it to spare.
+//
+// One of those spare bits is then a guard. Setting it before subtracting the
+// bottom of the range gives 16 + character - minimum, which is between 1 and 31
+// and so cannot borrow into the next byte, and whose guard bit is still standing
+// exactly when the character reached the minimum. Turning the subtraction around
+// asks the other half of the question, and the guards left standing in both are
+// the characters that fall inside the range.
+//
+// Mode::range sends a range whose ends agree to profanity_score_fn_rangeequal
+// instead, which has less to do than this.
 static inline int profanity_score_fn_range(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
+	const uint spread = 0x0F0F0F0Fu;
+	const uint guards = 0x10101010u;
+
+	const uint atLeast = (uint)data1[0] * 0x01010101u;
+	const uint atMost = ((uint)data2[0] * 0x01010101u) | guards;
+
 	int score = 0;
 
-	for (int i = 0; i < 20; ++i) {
-		const uchar byte = profanity_byte(address, i);
-		const uchar first = (byte & 0xF0) >> 4;
-		const uchar second = (byte & 0x0F);
+	for (int i = 0; i < 5; ++i) {
+		const uint low = address[i] & spread;
+		const uint high = (address[i] >> 4) & spread;
 
-		if (first >= data1[0] && first <= data2[0]) {
-			++score;
-		}
+		const uint lowIn = ((low | guards) - atLeast) & (atMost - low) & guards;
+		const uint highIn = ((high | guards) - atLeast) & (atMost - high) & guards;
 
-		if (second >= data1[0] && second <= data2[0]) {
-			++score;
-		}
+		// The two sets of guards sit four bits apart once one is shifted down,
+		// so a single count covers both.
+		score += popcount(lowIn | (highIn >> 4));
 	}
 
 	return score;
 }
 
-static inline int profanity_score_fn_zerobytes(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
-	int score = 0;
+// A range of a single character is a count of it, which is the whole of what a
+// `--range -m N -M N` search asks and what --zeros is built on. Counting does
+// not care what order the characters come in, so unlike the matching kernel this
+// needs no laying out: exclusive-or the character into every position at once,
+// fold each result down to whether it was non-zero, and the population count of
+// what is left is how many characters were not the one wanted.
+//
+// Mode::range picks this over profanity_score_fn_range when the two ends of the
+// range agree; a range spanning several characters still goes character by
+// character.
+static inline int profanity_score_fn_rangeequal(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
+	const uint wanted = (uint)data1[0] * 0x11111111u;
 
-	for (int i = 0; i < 20; ++i) {
-		if (profanity_byte(address, i) == 0) {
-			score++;
-		}
+	int missed = 0;
+
+	for (int i = 0; i < 5; ++i) {
+		uint x = address[i] ^ wanted;
+
+		// Leave a 1 in the low bit of every character that was not the one.
+		x |= x >> 2;
+		x |= x >> 1;
+		x &= 0x11111111u;
+
+		missed += popcount(x);
 	}
 
-	return score;
+	return 40 - missed;
+}
+
+// Counting is not a per-character question either, so this asks it of the whole
+// address at once as well: fold every byte down to whether any of its bits were
+// set, and what the population count then leaves is how many were not zero.
+static inline int profanity_score_fn_zerobytes(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
+	int missed = 0;
+
+	for (int i = 0; i < 5; ++i) {
+		uint x = address[i];
+
+		// Leave a 1 in the low bit of every byte that held something.
+		x |= x >> 4;
+		x |= x >> 2;
+		x |= x >> 1;
+		x &= 0x01010101u;
+
+		missed += popcount(x);
+	}
+
+	return 20 - missed;
 }
 
 static inline int profanity_score_fn_leadingrange(const uint * const address, __constant const uchar * const data1, __constant const uchar * const data2) {
@@ -1044,6 +1214,7 @@ PROFANITY_SCORE_KERNEL(benchmark)
 PROFANITY_SCORE_KERNEL(matching)
 PROFANITY_SCORE_KERNEL(leading)
 PROFANITY_SCORE_KERNEL(range)
+PROFANITY_SCORE_KERNEL(rangeequal)
 PROFANITY_SCORE_KERNEL(zerobytes)
 PROFANITY_SCORE_KERNEL(leadingrange)
 PROFANITY_SCORE_KERNEL(mirror)

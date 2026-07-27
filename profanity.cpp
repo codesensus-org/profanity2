@@ -3,6 +3,8 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <vector>
@@ -160,9 +162,35 @@ bool printResult(const cl_int err) {
 	return err != CL_SUCCESS;
 }
 
-std::string getDeviceCacheFilename(cl_device_id & d, const size_t & inverseSize, const size_t & inverseStrip, const size_t & inverseGroup) {
+// FNV-1a over whatever the compiled kernel was built out of. Nothing
+// cryptographic is wanted here — only that two different builds are unlikely to
+// land on the same name.
+uint64_t sourceFingerprint(const std::string & s) {
+	uint64_t hash = 0xcbf29ce484222325ULL;
+
+	for (const char c : s) {
+		hash ^= (uint64_t)(unsigned char)c;
+		hash *= 0x100000001b3ULL;
+	}
+
+	return hash;
+}
+
+// A compiled kernel is only interchangeable with the source and the build
+// options it came from, so both go into the name it is filed under. Keyed on the
+// device and the tuning alone — as this was — a cached binary outlives the
+// kernels it was built from: an upgrade that changes what the host passes a
+// kernel, or what a mode packs into data1, would be answered by a binary
+// compiled against the old meaning, and the search would run at full speed
+// scoring the wrong thing. A name that no longer matches simply misses, and the
+// kernel is compiled again, which is the whole cost of being wrong here.
+std::string getDeviceCacheFilename(cl_device_id & d, const uint64_t fingerprint) {
 	const auto uniqueId = getUniqueDeviceIdentifier(d);
-	return "cache-opencl." + toString(inverseSize) + "." + toString(inverseStrip) + "." + toString(inverseGroup) + "." + toString(uniqueId);
+
+	std::ostringstream ss;
+	ss << std::hex << std::setfill('0') << std::setw(16) << fingerprint;
+
+	return "cache-opencl." + ss.str() + "." + toString(uniqueId);
 }
 
 int main(int argc, char * * argv) {
@@ -304,6 +332,17 @@ int main(int argc, char * * argv) {
 		}
 		std::cout << "Target: " << mode.transformName() << std:: endl;
 
+		// Read before the devices are looked at rather than where the compiler
+		// needs them, because what a cached binary may be reused for is decided
+		// down there and these are what decides it.
+		const std::string strKeccak = readFile("keccak.cl");
+		const std::string strVanity = readFile("profanity.cl");
+		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE)
+			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup)
+			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA);
+
+		const uint64_t fingerprint = sourceFingerprint(strKeccak + strVanity + strBuildOptions);
+
 		std::vector<cl_device_id> vFoundDevices = getAllDevices();
 		std::vector<cl_device_id> vDevices;
 		std::map<cl_device_id, size_t> mDeviceIndex;
@@ -329,7 +368,7 @@ int main(int argc, char * * argv) {
 
 			// Check if there's a prebuilt binary for this device and load it
 			if(!bNoCache) {
-				std::ifstream fileIn(getDeviceCacheFilename(deviceId, inverseSize, inverseStrip, inverseGroup), std::ios::binary);
+				std::ifstream fileIn(getDeviceCacheFilename(deviceId, fingerprint), std::ios::binary);
 				if (fileIn.is_open()) {
 					vDeviceBinary.push_back(std::string((std::istreambuf_iterator<char>(fileIn)), std::istreambuf_iterator<char>()));
 					vDeviceBinarySize.push_back(vDeviceBinary.back().size());
@@ -374,8 +413,6 @@ int main(int argc, char * * argv) {
 		} else {
 			// Create a program from the kernel source
 			std::cout << "  Compiling kernel..." << std::flush;
-			const std::string strKeccak = readFile("keccak.cl");
-			const std::string strVanity = readFile("profanity.cl");
 			const char * szKernels[] = { strKeccak.c_str(), strVanity.c_str() };
 
 			clProgram = clCreateProgramWithSource(clContext, sizeof(szKernels) / sizeof(char *), szKernels, NULL, &errorCode);
@@ -386,8 +423,6 @@ int main(int argc, char * * argv) {
 
 		// Build the program
 		std::cout << "  Building program..." << std::flush;
-		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE)
-			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup);
 		if (printResult(clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL))) {
 #ifdef PROFANITY_DEBUG
 			std::cout << std::endl;
@@ -409,7 +444,7 @@ int main(int argc, char * * argv) {
 			std::cout << "  Saving program..." << std::flush;
 			auto binaries = getBinaries(clProgram);
 			for (size_t i = 0; i < binaries.size(); ++i) {
-				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], inverseSize, inverseStrip, inverseGroup), std::ios::binary);
+				std::ofstream fileOut(getDeviceCacheFilename(vDevices[i], fingerprint), std::ios::binary);
 				fileOut.write(binaries[i].data(), binaries[i].size());
 			}
 			std::cout << "OK" << std::endl;

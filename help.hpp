@@ -21,7 +21,13 @@ usage: ./profanity2 [OPTIONS]
 
   Modes with arguments:
     --leading <single hex>  Score on hashes leading with given hex character.
-    --matching <hex string> Score on hashes matching given hex string.
+    --matching <hex mask>   Score on hashes matching given hex mask. Non-hex
+                            characters (e.g. X) are wildcards, and the score is
+                            the number of characters the mask pins down that
+                            match. A mask 40 characters long is looked for where
+                            it is written; a shorter one is looked for anywhere
+                            in the address, so pad it out with wildcards to
+                            anchor it.
     -e, --exact <hex mask>  Print every hash matching the given mask exactly,
                             not just the best one. Non-hex characters (e.g. X)
                             are wildcards. Runs until interrupted.
@@ -67,6 +73,7 @@ usage: ./profanity2 [OPTIONS]
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --exact 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG

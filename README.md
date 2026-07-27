@@ -116,7 +116,13 @@ usage: ./profanity2 [OPTIONS]
 
   Modes with arguments:
     --leading <single hex>  Score on hashes leading with given hex character.
-    --matching <hex string> Score on hashes matching given hex string.
+    --matching <hex mask>   Score on hashes matching given hex mask. Non-hex
+                            characters (e.g. X) are wildcards, and the score is
+                            the number of characters the mask pins down that
+                            match. A mask 40 characters long is looked for where
+                            it is written; a shorter one is looked for anywhere
+                            in the address, so pad it out with wildcards to
+                            anchor it.
     -e, --exact <hex mask>  Print every hash matching the given mask exactly,
                             not just the best one. Non-hex characters (e.g. X)
                             are wildcards. Runs until interrupted.
@@ -148,6 +154,7 @@ usage: ./profanity2 [OPTIONS]
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --exact 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXc0de -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -208,11 +215,24 @@ and better results:
 Every position that is **not** a valid hex character (conventionally `X`) is a wildcard that
 matches anything. The score is the number of matched fixed positions.
 
-**Prefix** — a short pattern is anchored to the beginning of the address:
+The length of the pattern says where in the address it is looked for. A pattern of the full 40
+characters is looked for exactly where it is written; a shorter one is looked for at every
+position it could sit at, which is much the faster search of the two — there are 41 − *length*
+places for it to turn up in rather than one. Padding with wildcards is therefore how you anchor
+a pattern.
+
+**Anywhere** — a short pattern floats:
+
+```bash
+# 0x...dead... (anywhere in the address)
+./profanity2.x64 --matching dead -z $PUBLIC_KEY
+```
+
+**Prefix** — pad the end of the pattern out to 40 characters to pin it to the start:
 
 ```bash
 # 0xdead...
-./profanity2.x64 --matching dead -z $PUBLIC_KEY
+./profanity2.x64 --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z $PUBLIC_KEY
 ```
 
 **Suffix** — pad the beginning of a full 40-character pattern with `X` wildcards:
@@ -237,6 +257,13 @@ matches anything. The score is the number of matched fixed positions.
 ```bash
 # 0xXXXXcafeXXXX...XXXX (characters 5-8 are "cafe")
 ./profanity2.x64 --matching XXXXcafeXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX -z $PUBLIC_KEY
+```
+
+A pattern shorter than 40 characters may hold wildcards too, and floats as a whole:
+
+```bash
+# 0x...c0XXde... (anywhere in the address)
+./profanity2.x64 --matching c0XXde -z $PUBLIC_KEY
 ```
 
 Note: only results improving the best score so far are printed, so after a result matching
