@@ -15,7 +15,7 @@
 
 CC=g++
 CDEFINES=
-EXECUTABLES=test_correctness_pr49.x64 test_correctness_ptx.x64 test_scoring.x64 test_create2.x64 bench_score_matching.x64 bench_mod_mul_pr49.x64 bench_mod_mul_ptx.x64
+EXECUTABLES=test_correctness_pr49.x64 test_correctness_ptx.x64 test_scoring.x64 test_create2.x64 bench_score_matching.x64 bench_mod_mul_pr49.x64 bench_mod_mul_ptx.x64 bench_create2_state.x64 bench_address_state.x64
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -55,6 +55,16 @@ test_correctness_ptx.x64: test_correctness_ptx.cpp testutil.hpp ../types.hpp ../
 
 bench_mod_mul_ptx.x64: bench_mod_mul_ptx.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
 	$(CC) $(CFLAGS) $(CDEFINES) bench_mod_mul_ptx.cpp $(LDFLAGS) -o $@
+
+# Why profanity_create2 writes its hash state out a lane at a time instead of
+# through the loop it obviously wants to be.
+bench_create2_state.x64: bench_create2_state.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
+	$(CC) $(CFLAGS) $(CDEFINES) bench_create2_state.cpp $(LDFLAGS) -o $@
+
+# And whether the same thing is worth anything to the addresses a search that is
+# not looking for a CREATE2 one spends all of its time on.
+bench_address_state.x64: bench_address_state.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
+	$(CC) $(CFLAGS) $(CDEFINES) bench_address_state.cpp $(LDFLAGS) -o $@
 
 clean:
 	rm -rf $(EXECUTABLES)

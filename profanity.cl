@@ -77,6 +77,13 @@
 #define MP_BITS 32
 #define bswap32(n) (rotate(n & 0x00FF00FF, 24U)|(rotate(n, 8U) & 0x00FF00FF))
 
+// The same for eight bytes, out of two of the above. Used where a value written
+// big endian has to go into a state read little endian, which is a CREATE2
+// search putting its counter into the salt.
+static inline ulong bswap64(const ulong n) {
+	return ((ulong)bswap32(((uint)n)) << 32) | (ulong)bswap32(((uint)(n >> 32)));
+}
+
 // Whether the multiprecision routines below may use the carry flag directly.
 //
 // Every carry in this file is detected by comparison — `c = t > a ? 1 : (t == a
@@ -396,7 +403,7 @@ mp_word mp_mul_word_add_extra_ptx(mp_number * const r, const mp_number * const a
 #endif /* PROFANITY_PTX_MP */
 
 // Which of the two the rest of this file gets.
-inline mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
+static inline mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
 #ifdef PROFANITY_PTX_MP
 	return mp_mul_word_add_extra_ptx(r, a, w, extra);
 #else
@@ -431,7 +438,7 @@ inline mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * cons
 // q * pmod, which is never more than three words wide: pmod is 33 bits, so its
 // product with a single word is 65, and the modhigher term shifts one copy of
 // it up by a word.
-inline void mp_mod_word_addend(const mp_word w, const bool withModHigher, mp_word * const p0, mp_word * const p1, mp_word * const p2) {
+static inline void mp_mod_word_addend(const mp_word w, const bool withModHigher, mp_word * const p0, mp_word * const p1, mp_word * const p2) {
 	const mp_word lo977 = 977u * w;
 	const mp_word hi977 = mul_hi(977u, w);
 
@@ -498,7 +505,7 @@ void mp_mul_mod_word_sub_ptx(mp_number * const r, const mp_word w, const bool wi
 #endif /* PROFANITY_PTX_MP */
 
 // Which of the two the rest of this file gets.
-inline void mp_mul_mod_word_sub(mp_number * const r, const mp_word w, const bool withModHigher) {
+static inline void mp_mul_mod_word_sub(mp_number * const r, const mp_word w, const bool withModHigher) {
 #ifdef PROFANITY_PTX_MP
 	mp_mul_mod_word_sub_ptx(r, w, withModHigher);
 #else
@@ -863,17 +870,40 @@ static inline void profanity_address(const mp_number * const x, const mp_number 
 	address[4] = h.d[7];
 
 	if (bContract) {
-		ethhash c = { { 0 } };
+		ethhash c;
 
-		// set up keccak(0xd6, 0x94, address, 0x80)
-		c.b[0] = 0xd6;
-		c.b[1] = 0x94;
-		for (int i = 0; i < 20; ++i) {
-			c.b[i + 2] = profanity_byte(address, i);
-		}
-		c.b[22] = 0x80;
+		// keccak(0xd6, 0x94, address, 0x80) — the RLP of this account and a
+		// nonce of one, which is where the first contract it deploys lands.
+		// Twenty-three bytes and the byte that ends the message after them, so
+		// three lanes and twenty-two empty ones.
+		//
+		// Written as whole lanes at indices the compiler knows for the same
+		// reason profanity_create2 is, and measured at +3.4% of a --contract
+		// search on an RTX 4090 against the loop of byte stores this replaced.
+		// The same rewrite is worth nothing at all to the account address above,
+		// which is why only this half of the function has had it — see
+		// tests/bench_address_state.cpp for both numbers.
+		//
+		// The address is five uints holding it little endian, so each lane takes
+		// whichever of them land in it, halved where one crosses the boundary.
+		c.q[0] = (ulong)0xd6                        // byte 0
+			| ((ulong)0x94 << 8)                    // byte 1
+			| ((ulong)address[0] << 16)             // bytes 2-5
+			| ((ulong)(address[1] & 0xFFFF) << 48); // bytes 6-7
+		c.q[1] = (ulong)(address[1] >> 16)          // bytes 8-9
+			| ((ulong)address[2] << 16)             // bytes 10-13
+			| ((ulong)(address[3] & 0xFFFF) << 48); // bytes 14-15
+		c.q[2] = (ulong)(address[3] >> 16)          // bytes 16-17
+			| ((ulong)address[4] << 16)             // bytes 18-21
+			| ((ulong)0x80 << 48)                   // byte 22
+			| ((ulong)0x01 << 56);                  // byte 23, ending the message
+		c.q[3] = 0; c.q[4] = 0; c.q[5] = 0; c.q[6] = 0;
+		c.q[7] = 0; c.q[8] = 0; c.q[9] = 0; c.q[10] = 0;
+		c.q[11] = 0; c.q[12] = 0; c.q[13] = 0; c.q[14] = 0;
+		c.q[15] = 0; c.q[16] = 0; c.q[17] = 0; c.q[18] = 0;
+		c.q[19] = 0; c.q[20] = 0; c.q[21] = 0; c.q[22] = 0;
+		c.q[23] = 0; c.q[24] = 0;
 
-		c.b[23] ^= 0x01; // length 23
 		sha3_keccakf(&c);
 
 		address[0] = c.d[3];
@@ -1604,16 +1634,47 @@ __kernel void profanity_create2_init(__global result * const pResult) {
 	pResult[get_global_id(0)].found = 0;
 }
 
+// The state a candidate's hash starts from.
+//
+// Written out whole lanes at a time, at indices the compiler knows. Worth +7%
+// on an RTX 4090 and around a third on a CPU device against what it replaced,
+// which zeroed the state and copied the message in through a loop.
+//
+// Both halves of how it is written matter and neither on its own does anything.
+// The same lane construction through a loop measures within noise of the old
+// one, and so does the old one with its loops written out — see the variants
+// kept in tests/harness.cl, which are there to stop this being tidied back into
+// either of them. Why the cliff is exactly there is not established: the
+// account address below writes 32-bit halves at constant indices and does not
+// fall off it. So this is a measurement about this one site and not a rule to
+// apply elsewhere without measuring again.
 static inline void profanity_create2(__constant const uint * const pTemplate, const ulong counter, uint * const address) {
-	ethhash h = { { 0 } };
+	ethhash h;
 
-	for (int i = 0; i < PROFANITY_CREATE2_WORDS; ++i) {
-		h.d[i] = pTemplate[i];
-	}
+	// The counter goes in big endian, so the eight bytes it occupies read, as a
+	// little-endian lane does, as the counter byte-reversed. It straddles two
+	// lanes and reaches neither end of either, so that is a shift each way and
+	// a mask over whatever the salt left there — rather than eight byte stores.
+	const ulong swapped = bswap64(counter);
+	const ulong keepLow = ((ulong)1 << PROFANITY_CREATE2_COUNTER_SHIFT) - 1;
 
-	for (int i = 0; i < 8; ++i) {
-		h.b[PROFANITY_CREATE2_COUNTER + i] = (uchar)(counter >> ((7 - i) * 8));
-	}
+	h.q[0] = (ulong)pTemplate[0] | ((ulong)pTemplate[1] << 32);
+	h.q[1] = (ulong)pTemplate[2] | ((ulong)pTemplate[3] << 32);
+	h.q[2] = (ulong)pTemplate[4] | ((ulong)pTemplate[5] << 32);
+	h.q[3] = (ulong)pTemplate[6] | ((ulong)pTemplate[7] << 32);
+	h.q[4] = (ulong)pTemplate[8] | ((ulong)pTemplate[9] << 32);
+	h.q[5] = (((ulong)pTemplate[10] | ((ulong)pTemplate[11] << 32)) & keepLow) | (swapped << PROFANITY_CREATE2_COUNTER_SHIFT);
+	h.q[6] = (((ulong)pTemplate[12] | ((ulong)pTemplate[13] << 32)) & ~keepLow) | (swapped >> (64 - PROFANITY_CREATE2_COUNTER_SHIFT));
+	h.q[7] = (ulong)pTemplate[14] | ((ulong)pTemplate[15] << 32);
+	h.q[8] = (ulong)pTemplate[16] | ((ulong)pTemplate[17] << 32);
+	h.q[9] = (ulong)pTemplate[18] | ((ulong)pTemplate[19] << 32);
+	h.q[10] = (ulong)pTemplate[20] | ((ulong)pTemplate[21] << 32);
+
+	// Eighty-five bytes and a terminator reach lane ten and no further. The bit
+	// that ends the block is sha3_keccakf's to set.
+	h.q[11] = 0; h.q[12] = 0; h.q[13] = 0; h.q[14] = 0; h.q[15] = 0;
+	h.q[16] = 0; h.q[17] = 0; h.q[18] = 0; h.q[19] = 0; h.q[20] = 0;
+	h.q[21] = 0; h.q[22] = 0; h.q[23] = 0; h.q[24] = 0;
 
 	sha3_keccakf(&h);
 

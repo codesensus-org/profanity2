@@ -66,6 +66,22 @@ inline void buildCreate2Template(cl_uint * const words, const create2 & fixed, c
 	}
 }
 
+/* Which lane the counter starts in and how far up it. The kernel puts it there
+ * with a shift into each of the two lanes it straddles rather than a byte at a
+ * time, and needs to be told where from — see profanity_create2. */
+#define PROFANITY_CREATE2_COUNTER_LANE (PROFANITY_CREATE2_COUNTER / 8)
+#define PROFANITY_CREATE2_COUNTER_SHIFT ((PROFANITY_CREATE2_COUNTER % 8) * 8)
+
+/* A counter starting on a lane boundary would leave that kernel shifting a
+ * 64-bit value by 64, which is undefined rather than zero. */
+static_assert(PROFANITY_CREATE2_COUNTER_SHIFT != 0, "the counter must straddle two lanes");
+static_assert(PROFANITY_CREATE2_COUNTER / 8 + 1 < PROFANITY_CREATE2_WORDS / 2, "the counter must fall inside the words the template covers");
+
+/* profanity_create2 writes its state at indices the compiler can see, which is
+ * the whole point of how it is written, so the two lanes the counter lands in
+ * are spelled out there rather than worked out. This is the agreement. */
+static_assert(PROFANITY_CREATE2_COUNTER_LANE == 5, "profanity_create2 spells out lanes 5 and 6 as the ones the counter falls in");
+
 /* The salt a counter stands for: the one a device is searching from, with the
  * counter written over its last eight bytes exactly as the kernel writes it.
  * Big endian, so that a salt read off a printed line counts upwards the way it

@@ -323,6 +323,101 @@ static void testCounterMapping(const ClSetup & s) {
 	}
 }
 
+// That building the hash state a lane at a time changed nothing about where a
+// salt lands.
+//
+// profanity_create2 writes twenty-five lanes at constant indices and puts the
+// counter in with a shift into each of the two lanes it straddles, where it
+// used to copy words into a zeroed state and write the counter a byte at a
+// time. Same message, arrived at differently — and a byte of it out of place
+// is an address twenty-four rounds away from the right one. So this hashes a
+// run of counters both ways and compares.
+//
+// The counters are consecutive rather than random on purpose: they walk the
+// carry through every byte the counter occupies, which is what the shifts and
+// the masks around them have to get right.
+static void testPlainVsShipped(const ClSetup & s) {
+	const Vector & v = g_vectors[2];
+
+	create2 fixed;
+	std::memset(&fixed, 0, sizeof(fixed));
+	const auto factory = fromHex(v.factory);
+	const auto caller = fromHex(v.caller);
+	const auto initCodeHash = fromHex(v.initCodeHash);
+	std::copy(factory.begin(), factory.end(), fixed.factory);
+	std::copy(caller.begin(), caller.end(), fixed.caller);
+	std::copy(initCodeHash.begin(), initCodeHash.end(), fixed.initCodeHash);
+
+	// A salt whose fixed part is not zero anywhere, so that a lane wrongly
+	// a lane wrongly written carries something a zero would have hidden. Its
+	// last eight bytes are deliberately non-zero too: the kernel masks its
+	// counter over that hole, so anything left there would show up here.
+	cl_uchar salt[32];
+	for (int i = 0; i < 32; ++i) {
+		salt[i] = (cl_uchar)(0x11 * (i % 15) + i);
+	}
+	std::copy(fixed.caller, fixed.caller + 20, salt);
+
+	cl_uint words[PROFANITY_CREATE2_WORDS];
+	buildCreate2Template(words, fixed, salt);
+
+	// Enough to carry out of every byte the counter sits in, and a run either
+	// side of the points where it does.
+	static const cl_ulong bases[] = {
+		0, 1, 0xFE, 0xFFFE, 0xFFFFFE, 0xFFFFFFFE, 0xFFFFFFFFFE, 0xFFFFFFFFFFFE,
+		0xFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFF0, 0x0123456789abcdefULL,
+	};
+	const size_t span = 64;
+
+	cl_int err;
+	cl_mem templateBuf = clCreateBuffer(s.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(words), words, &err);
+	clCheck(err, "clCreateBuffer(template)");
+	cl_mem plainBuf = clCreateBuffer(s.context, CL_MEM_WRITE_ONLY, span * 5 * sizeof(cl_uint), NULL, &err);
+	clCheck(err, "clCreateBuffer(plain)");
+	cl_mem newBuf = clCreateBuffer(s.context, CL_MEM_WRITE_ONLY, span * 5 * sizeof(cl_uint), NULL, &err);
+	clCheck(err, "clCreateBuffer(shipped out)");
+
+	cl_kernel kernel = clCreateKernel(s.program, "k_create2_both", &err);
+	clCheck(err, "clCreateKernel(k_create2_both)");
+
+	int failures = 0;
+	size_t compared = 0;
+
+	for (const cl_ulong base : bases) {
+		std::vector<cl_uint> plain(span * 5), fresh(span * 5);
+
+		clCheck(clSetKernelArg(kernel, 0, sizeof(cl_mem), &templateBuf), "clSetKernelArg(0)");
+		clCheck(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &base), "clSetKernelArg(1)");
+		clCheck(clSetKernelArg(kernel, 2, sizeof(cl_mem), &plainBuf), "clSetKernelArg(2)");
+		clCheck(clSetKernelArg(kernel, 3, sizeof(cl_mem), &newBuf), "clSetKernelArg(3)");
+
+		clCheck(clEnqueueNDRangeKernel(s.queue, kernel, 1, NULL, &span, NULL, 0, NULL, NULL), "clEnqueueNDRangeKernel");
+		clCheck(clEnqueueReadBuffer(s.queue, plainBuf, CL_TRUE, 0, plain.size() * sizeof(cl_uint), plain.data(), 0, NULL, NULL), "clEnqueueReadBuffer(plain)");
+		clCheck(clEnqueueReadBuffer(s.queue, newBuf, CL_TRUE, 0, fresh.size() * sizeof(cl_uint), fresh.data(), 0, NULL, NULL), "clEnqueueReadBuffer(shipped)");
+		clCheck(clFinish(s.queue), "clFinish");
+
+		for (size_t i = 0; i < span; ++i) {
+			++compared;
+			if (std::memcmp(&plain[i * 5], &fresh[i * 5], 5 * sizeof(cl_uint)) != 0) {
+				if (++failures <= 5) {
+					std::printf("FAIL  counter %llu hashes differently with the state built a lane at a time\n",
+						(unsigned long long)(base + i));
+				}
+			}
+		}
+	}
+
+	clReleaseKernel(kernel);
+	clReleaseMemObject(templateBuf);
+	clReleaseMemObject(plainBuf);
+	clReleaseMemObject(newBuf);
+
+	g_failures += failures;
+	if (failures == 0) {
+		std::printf("PASS  %zu counters hash the same however the state is built\n", compared);
+	}
+}
+
 int main(int argc, char * * argv) {
 	(void) argc;
 	(void) argv;
@@ -331,6 +426,7 @@ int main(int argc, char * * argv) {
 
 	ClSetup s = clSetup();
 
+	testPlainVsShipped(s);
 	testCounterMapping(s);
 
 	for (const Vector & v : g_vectors) {

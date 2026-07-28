@@ -487,6 +487,10 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA)
 			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
 			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER)
+			// Where the counter sits in the state the kernel builds, worked
+			// out from create2.hpp rather than written down again there.
+			+ " -D PROFANITY_CREATE2_COUNTER_LANE=" + toString(PROFANITY_CREATE2_COUNTER_LANE)
+			+ " -D PROFANITY_CREATE2_COUNTER_SHIFT=" + toString(PROFANITY_CREATE2_COUNTER_SHIFT)
 			+ " -D PROFANITY_VARIANTS=" + toString(variants)
 			+ " -D PROFANITY_ROUNDS=" + toString(rounds)
 			// The kernel decides for itself whether to use the inline-PTX

@@ -54,14 +54,24 @@
 // The CREATE2 layout is taken from the header the host builds its preimage
 // with rather than written out again, since the whole point of the test that
 // reads it is that the two agree.
-static const char * const g_buildOptions =
-	"-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_INVERSE_STRIP=8"
-	" -D PROFANITY_INVERSE_GROUP=128 -D PROFANITY_MODE_DATA=" PROFANITY_STRINGIFY(PROFANITY_MODE_DATA)
-	" -D PROFANITY_MAX_SCORE=" PROFANITY_STRINGIFY(PROFANITY_TEST_MAX_SCORE)
-	" -D PROFANITY_CREATE2_WORDS=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_WORDS)
-	" -D PROFANITY_CREATE2_COUNTER=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_COUNTER)
-	" -D PROFANITY_VARIANTS=6"
-	" -D PROFANITY_ROUNDS=" PROFANITY_STRINGIFY(PROFANITY_TEST_ROUNDS);
+// Built rather than pasted together: several of these macros are expressions
+// and not literals, and stringifying one of those yields something with spaces
+// in it -- which a build option string is split on, leaving the compiler with
+// "/" as an option of its own. Evaluating them here hands over the number.
+inline std::string buildOptions() {
+	const std::string prep = " -D PROFANITY_CREATE2_COUNTER_LANE=" + std::to_string(PROFANITY_CREATE2_COUNTER_LANE)
+		+ " -D PROFANITY_CREATE2_COUNTER_SHIFT=" + std::to_string(PROFANITY_CREATE2_COUNTER_SHIFT);
+
+	return std::string("-D PROFANITY_INVERSE_SIZE=2 -D PROFANITY_INVERSE_STRIP=8")
+		+ " -D PROFANITY_INVERSE_GROUP=128"
+		+ " -D PROFANITY_MODE_DATA=" + std::to_string(PROFANITY_MODE_DATA)
+		+ " -D PROFANITY_MAX_SCORE=" + std::to_string(PROFANITY_TEST_MAX_SCORE)
+		+ " -D PROFANITY_CREATE2_WORDS=" + std::to_string(PROFANITY_CREATE2_WORDS)
+		+ " -D PROFANITY_CREATE2_COUNTER=" + std::to_string(PROFANITY_CREATE2_COUNTER)
+		+ prep
+		+ " -D PROFANITY_VARIANTS=6"
+		+ " -D PROFANITY_ROUNDS=" + std::to_string(PROFANITY_TEST_ROUNDS);
+}
 
 inline void clCheck(const cl_int err, const char * const what) {
 	if (err != CL_SUCCESS) {
@@ -142,7 +152,7 @@ inline ClSetup clSetup() {
 	s.program = clCreateProgramWithSource(s.context, sizeof(szKernels) / sizeof(char *), szKernels, NULL, &errorCode);
 	clCheck(errorCode, "clCreateProgramWithSource");
 
-	if (clBuildProgram(s.program, 1, &s.device, g_buildOptions, NULL, NULL) != CL_SUCCESS) {
+	if (clBuildProgram(s.program, 1, &s.device, buildOptions().c_str(), NULL, NULL) != CL_SUCCESS) {
 		size_t sizeLog = 0;
 		clGetProgramBuildInfo(s.program, s.device, CL_PROGRAM_BUILD_LOG, 0, NULL, &sizeLog);
 		std::string log(sizeLog, '\0');
