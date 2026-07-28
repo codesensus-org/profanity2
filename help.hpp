@@ -148,7 +148,8 @@ usage: ./profanity2 [OPTIONS]
                             transform to reach the private key. At 6 that
                             is five results in six.
     -R, --rounds <n>        How many point additions a launch does per point,
-                            before handing back. [default = 1]
+                            before handing back -- or, with --create2, how many
+                            salts it tries per work item. [default = 1]
 
                             This saves the kernel launch and nothing else. A
                             point's delta and previous lambda still go out to

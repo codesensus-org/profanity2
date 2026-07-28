@@ -1624,10 +1624,22 @@ static inline void profanity_create2(__constant const uint * const pTemplate, co
 	address[4] = h.d[7];
 }
 
-// One kernel per scoring mode again, over the salts of a round rather than over
-// points. The host hands each round the counter its first work item searches;
-// what any of them searched is that plus the work item's own index, which is
-// what pResult carries back for the salt to be put together again on the host.
+// One kernel per scoring mode again, over the salts of a launch rather than over
+// points. The host hands each launch the counter its first work item searches,
+// and a work item takes PROFANITY_ROUNDS consecutive counters from there —
+// blocked rather than strided, so that what a work item searched depends on
+// PROFANITY_ROUNDS and its own index and on nothing else the host would have to
+// agree about.
+//
+// Strided would want the number of work items, and get_global_size is not it:
+// enqueueKernel splits a launch wider than the device's maximum into several
+// NDRanges at an offset, so get_global_id runs over the whole launch while
+// get_global_size is only ever the piece of it currently in flight. A blocked
+// mapping never asks.
+//
+// What a result was found at is therefore counterBase + foundId * rounds +
+// foundRound, which is what the host puts the salt back together from — see
+// Dispatcher::report.
 #define PROFANITY_CREATE2_KERNEL(NAME) \
 __kernel void profanity_create2_score_##NAME( \
 		__global result * const pResult, \
@@ -1638,10 +1650,13 @@ __kernel void profanity_create2_score_##NAME( \
 		__constant const uint * const pTemplate, \
 		const ulong counterBase) { \
 	const size_t id = get_global_id(0); \
+	const ulong counter = counterBase + (ulong)id * PROFANITY_ROUNDS; \
 	uint address[5]; \
-	profanity_create2(pTemplate, counterBase + id, address); \
-	const int score = profanity_score_fn_##NAME(address, data1, data2); \
-	profanity_result_update(id, 0, 0, address, pResult, score, scoreMax, bAppend); \
+	for (uint round = 0; round < PROFANITY_ROUNDS; ++round) { \
+		profanity_create2(pTemplate, counter + round, address); \
+		const int score = profanity_score_fn_##NAME(address, data1, data2); \
+		profanity_result_update(id, round, 0, address, pResult, score, scoreMax, bAppend); \
+	} \
 }
 
 PROFANITY_CREATE2_KERNEL(benchmark)

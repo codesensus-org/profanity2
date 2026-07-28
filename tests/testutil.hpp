@@ -42,6 +42,11 @@
 // they hand over still has to be the size the kernels were built for.
 #define PROFANITY_TEST_MAX_SCORE 40
 
+// How many rounds a launch is built for here. Above one on purpose: a round is
+// a loop the kernels take several times per work item, and at one round that
+// loop runs once and hides anything the round index is wrong about.
+#define PROFANITY_TEST_ROUNDS 2
+
 // The value of PROFANITY_INVERSE_SIZE does not affect the mp_* math functions
 // under test; a small value keeps kernel compilation fast on CPU OpenCL
 // implementations like PoCL.
@@ -56,7 +61,7 @@ static const char * const g_buildOptions =
 	" -D PROFANITY_CREATE2_WORDS=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_WORDS)
 	" -D PROFANITY_CREATE2_COUNTER=" PROFANITY_STRINGIFY(PROFANITY_CREATE2_COUNTER)
 	" -D PROFANITY_VARIANTS=6"
-	" -D PROFANITY_ROUNDS=2";
+	" -D PROFANITY_ROUNDS=" PROFANITY_STRINGIFY(PROFANITY_TEST_ROUNDS);
 
 inline void clCheck(const cl_int err, const char * const what) {
 	if (err != CL_SUCCESS) {

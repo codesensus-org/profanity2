@@ -115,8 +115,18 @@ static const Vector g_vectors[] = {
 
 /* ------------------------------------------------------------------------ */
 
-// The address one work item arrives at, out of the buffer the kernel appends to.
-static std::string runCreate2(const ClSetup & s, const Vector & v) {
+// What one launch of the kernel appended: which work item and which round of it
+// each address turned up at, in the order the kernel wrote them.
+struct Found {
+	cl_uint id;
+	cl_uint round;
+	std::string address;
+};
+
+// Runs profanity_create2_score_range over `globalSize` work items from
+// `counterBase`. Every work item takes PROFANITY_TEST_ROUNDS counters, so this
+// comes back with that many entries per work item.
+static std::vector<Found> runCreate2Launch(const ClSetup & s, const Vector & v, const cl_ulong counterBase, const size_t globalSize) {
 	create2 fixed;
 	std::memset(&fixed, 0, sizeof(fixed));
 
@@ -173,11 +183,9 @@ static std::string runCreate2(const ClSetup & s, const Vector & v) {
 	clCheck(clSetKernelArg(kernel, 3, sizeof(cl_uchar), &scoreMax), "clSetKernelArg(3)");
 	clCheck(clSetKernelArg(kernel, 4, sizeof(cl_uchar), &bAppend), "clSetKernelArg(4)");
 	clCheck(clSetKernelArg(kernel, 5, sizeof(cl_mem), &templateBuf), "clSetKernelArg(5)");
-	clCheck(clSetKernelArg(kernel, 6, sizeof(cl_ulong), &v.counter), "clSetKernelArg(6)");
+	clCheck(clSetKernelArg(kernel, 6, sizeof(cl_ulong), &counterBase), "clSetKernelArg(6)");
 
-	// One work item, so the counter it searches is the vector's exactly.
-	const size_t one = 1;
-	clCheck(clEnqueueNDRangeKernel(s.queue, kernel, 1, NULL, &one, NULL, 0, NULL, NULL), "clEnqueueNDRangeKernel");
+	clCheck(clEnqueueNDRangeKernel(s.queue, kernel, 1, NULL, &globalSize, NULL, 0, NULL, NULL), "clEnqueueNDRangeKernel");
 	clCheck(clEnqueueReadBuffer(s.queue, resultBuf, CL_TRUE, 0, results.size() * sizeof(result), results.data(), 0, NULL, NULL), "clEnqueueReadBuffer");
 	clCheck(clFinish(s.queue), "clFinish");
 
@@ -187,12 +195,34 @@ static std::string runCreate2(const ClSetup & s, const Vector & v) {
 	clReleaseMemObject(data2Buf);
 	clReleaseMemObject(templateBuf);
 
-	if (results[0].found != 1) {
-		std::fprintf(stderr, "the kernel appended %u results, expected 1\n", results[0].found);
+	// Every work item scores every round above the floor, so a launch appends
+	// one entry per counter it searched. Anything else and the loop the rounds
+	// are taken in is not running the number of times it was built for.
+	const cl_uint expected = (cl_uint)(globalSize * PROFANITY_TEST_ROUNDS);
+	if (results[0].found != expected) {
+		std::fprintf(stderr, "the kernel appended %u results, expected %u (%zu work items x %d rounds)\n",
+			results[0].found, expected, globalSize, PROFANITY_TEST_ROUNDS);
 		std::exit(1);
 	}
 
-	return toHex(results[1].foundHash, 20);
+	std::vector<Found> found;
+	for (cl_uint i = 0; i < expected; ++i) {
+		found.push_back({ results[i + 1].foundId, results[i + 1].foundRound, toHex(results[i + 1].foundHash, 20) });
+	}
+	return found;
+}
+
+// The address at one counter exactly: one work item from there, and the round
+// it takes first is that counter itself.
+static std::string runCreate2(const ClSetup & s, const Vector & v, const cl_ulong counter) {
+	for (const Found & f : runCreate2Launch(s, v, counter, 1)) {
+		if (f.id == 0 && f.round == 0) {
+			return f.address;
+		}
+	}
+
+	std::fprintf(stderr, "the kernel appended no result for round 0\n");
+	std::exit(1);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -230,6 +260,69 @@ static void testSaltRoundTrip() {
 	}
 }
 
+// Which counter a work item's round stands for. The kernel gives each work item
+// a block of PROFANITY_ROUNDS consecutive counters, and Dispatcher::report puts
+// a salt back together from base + foundId * rounds + foundRound — so the two
+// have to mean the same thing by it, or a printed salt belongs to an address
+// nobody found.
+//
+// Checked by asking the kernel twice: once over several work items at once, and
+// once for each counter that mapping claims they searched, a work item at a time
+// from that counter. The addresses have to line up.
+static void testCounterMapping(const ClSetup & s) {
+	// The vector with the busiest preimage of the five, so that a counter going
+	// astray lands somewhere visibly different.
+	const Vector & v = g_vectors[3];
+
+	const cl_ulong base = 0x00000000cafeba00ULL;
+	const size_t items = 3;
+
+	const std::vector<Found> launch = runCreate2Launch(s, v, base, items);
+
+	// Every work item's every round, once each: a mapping that sends two of
+	// them to the same counter searches fewer salts than it is credited with.
+	std::vector<bool> seen(items * PROFANITY_TEST_ROUNDS, false);
+	int failures = 0;
+
+	for (const Found & f : launch) {
+		if (f.id >= items || f.round >= PROFANITY_TEST_ROUNDS) {
+			++failures;
+			std::printf("FAIL  the kernel reported id %u round %u, outside the %zu x %d it was launched over\n",
+				f.id, f.round, items, PROFANITY_TEST_ROUNDS);
+			continue;
+		}
+
+		const size_t slot = f.id * PROFANITY_TEST_ROUNDS + f.round;
+		if (seen[slot]) {
+			++failures;
+			std::printf("FAIL  id %u round %u turned up twice\n", f.id, f.round);
+			continue;
+		}
+		seen[slot] = true;
+
+		const cl_ulong counter = base + (cl_ulong)f.id * PROFANITY_TEST_ROUNDS + f.round;
+		const std::string expected = runCreate2(s, v, counter);
+
+		if (f.address != expected) {
+			++failures;
+			std::printf("FAIL  id %u round %u should be counter %llu\n      found    0x%s\n      counter  0x%s\n",
+				f.id, f.round, (unsigned long long) counter, f.address.c_str(), expected.c_str());
+		}
+	}
+
+	for (size_t slot = 0; slot < seen.size(); ++slot) {
+		if (!seen[slot]) {
+			++failures;
+			std::printf("FAIL  id %zu round %zu was never searched\n", slot / PROFANITY_TEST_ROUNDS, slot % PROFANITY_TEST_ROUNDS);
+		}
+	}
+
+	g_failures += failures;
+	if (failures == 0) {
+		std::printf("PASS  a launch searches base + id * rounds + round, once each\n");
+	}
+}
+
 int main(int argc, char * * argv) {
 	(void) argc;
 	(void) argv;
@@ -238,8 +331,10 @@ int main(int argc, char * * argv) {
 
 	ClSetup s = clSetup();
 
+	testCounterMapping(s);
+
 	for (const Vector & v : g_vectors) {
-		const std::string got = runCreate2(s, v);
+		const std::string got = runCreate2(s, v, v.counter);
 
 		if (got == v.expected) {
 			std::printf("PASS  %s\n", v.what);

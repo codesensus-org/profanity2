@@ -283,7 +283,7 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_inverseGroup(inverseGroup)
 	, m_size(inverseSize*inverseMultiple)
 	, m_variants(mode.target == CREATE2 ? 1 : variants)
-	, m_rounds(mode.target == CREATE2 ? 1 : rounds)
+	, m_rounds(rounds)
 	, m_clScoreMax(clScoreMin > 0 ? clScoreMin : mode.score)
 	, m_clScoreMin(clScoreMin)
 	, m_clScoreQuit(clScoreQuit)
@@ -554,10 +554,15 @@ void Dispatcher::dispatch(Device & d) {
 	}
 
 	if (m_mode.target == CREATE2) {
-		// The read above will bring back the round the previous call enqueued,
-		// so where that round's counter started has to be kept for it. Nothing
+		// The read above will bring back the launch the previous call enqueued,
+		// so where that launch's counters started has to be kept for it. Nothing
 		// has been enqueued before the first call and the buffer it reads is
 		// the cleared one, so what this holds then is never looked at.
+		//
+		// m_round counts rounds and not launches, so it has already advanced by
+		// m_rounds for every launch behind this one — and a launch covers
+		// m_size * m_rounds counters, m_size work items taking m_rounds each.
+		// The two agree, and the base stays m_round * m_size at any m_rounds.
 		d.m_counterFound = d.m_counterQueued;
 		d.m_counterQueued = d.m_round * m_size;
 
@@ -588,7 +593,7 @@ void Dispatcher::dispatch(Device & d) {
 	// optimizations.
 	clFinish(d.m_clQueue);
 	if (m_mode.target == CREATE2) {
-		std::cout << "Timing: profanity_create2 = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
+		std::cout << "Timing: profanity_create2 = " << getKernelExecutionTimeMicros(eventIterate) << "us for " << m_rounds << " round(s)" << std::endl;
 	} else {
 		std::cout << "Timing: profanity_iterate = " << getKernelExecutionTimeMicros(eventIterate) << "us for " << m_rounds << " round(s)" << std::endl;
 	}
@@ -673,7 +678,16 @@ static const char * const g_variantNames[] = {
 
 void Dispatcher::report(Device & d, const result & r, const cl_uchar score) {
 	if (m_mode.target == CREATE2) {
-		printResult("Salt", saltFor(d.m_salt, d.m_counterFound + r.foundId), r, score, timeStart, m_mode);
+		// The counter this result was found at, laid out the way the kernel
+		// walks them: each work item takes m_rounds consecutive counters from
+		// the launch's base, so its block starts at foundId * m_rounds and
+		// foundRound says how far into that block this one was. m_counterFound
+		// is the base of the launch these results came from, which dispatch()
+		// keeps for exactly this because the read that brings them back is
+		// enqueued a launch after the one that produced them.
+		const cl_ulong counter = d.m_counterFound + (cl_ulong)r.foundId * m_rounds + r.foundRound;
+
+		printResult("Salt", saltFor(d.m_salt, counter), r, score, timeStart, m_mode);
 		return;
 	}
 
