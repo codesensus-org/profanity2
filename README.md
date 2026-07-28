@@ -127,6 +127,41 @@ sum (63 symbols):       bc7506af1b2484069d6ed3ea093c5123d83e2444d9c0a1cf277bf136
 private key (padded):  0bc7506af1b2484069d6ed3ea093c5123d83e2444d9c0a1cf277bf136fb46191
 ```
 
+# Tuning a machine
+
+What the performance flags should be varies by card by more than any default can
+cover: two-level inversion is +38% on an RTX 4090 and -62% on a GTX 1070. So
+measure rather than guess.
+
+```bash
+./autotune.py                 # ~20-40 minutes, prints the flags to use
+./autotune.py --cpu --quick   # a few minutes, to see what it does
+```
+
+It hill-climbs each flag along a ladder of sensible values rather than sweeping a
+grid, and ends by printing every chosen value against its neighbours on either
+side -- which is the evidence that the answer is a peak rather than somewhere the
+search happened to stop:
+
+```
+  flag                      value    addresses/s    vs best
+  --------------------------------------------------------------------
+  variants                      5    25.953 MH/s      -8.9%
+  variants                      6    28.479 MH/s        best <-- chosen
+
+  strip_group              (0, 0)    23.931 MH/s     -16.0%
+  strip_group             (8, 64)    28.479 MH/s        best <-- chosen
+  strip_group            (8, 128)      ruled out
+```
+
+A neighbour that measures *better* is called out rather than folded in: that
+means the search did not converge, and the difference is probably inside the
+noise. `--duration` buys tighter measurements, `--threshold` sets how small a
+gain is worth chasing, and `--json` writes down every measurement it took.
+
+The speeds are in addresses per second, so counts of `--variants` compare
+directly against each other.
+
 # Building
 
 ### macOS
