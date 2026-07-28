@@ -270,7 +270,7 @@ Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
@@ -279,6 +279,7 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_inverseStrip(inverseStrip)
 	, m_inverseGroup(inverseGroup)
 	, m_size(inverseSize*inverseMultiple)
+	, m_variants(mode.target == CREATE2 ? 1 : variants)
 	, m_clScoreMax(clScoreMin > 0 ? clScoreMin : mode.score)
 	, m_clScoreMin(clScoreMin)
 	, m_clScoreQuit(clScoreQuit)
@@ -649,13 +650,22 @@ void Dispatcher::handleFloorResult(Device & d) {
 // private key behind their seed, or the salt to deploy with. Both are called
 // out by name on the line, so whatever reads it does not have to know which
 // search produced it before it can read it.
+//
+// A negated result is named apart rather than flagged alongside, for the same
+// reason. The scalar on such a line is added to the seed key as ever, but the
+// sum is then negated modulo the order of the curve, and a reader that has not
+// been taught the difference stands to derive a key for the wrong address from
+// it. Under a name of its own it goes unread by such a reader instead, which
+// loses the result and not the funds that would be sent to it.
 void Dispatcher::report(Device & d, const result & r, const cl_uchar score) {
 	if (m_mode.target == CREATE2) {
 		printResult("Salt", saltFor(d.m_salt, d.m_counterFound + r.foundId), r, score, timeStart, m_mode);
 		return;
 	}
 
-	printResult("Private", privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
+	const char * const what = r.foundVariant == PROFANITY_VARIANT_NEGATED ? "PrivateNegated" : "Private";
+
+	printResult(what, privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
 }
 
 void Dispatcher::handleResult(Device & d) {
@@ -703,7 +713,7 @@ void Dispatcher::onEvent(cl_event event, cl_int status, Device & d) {
 		bool bDispatch = true;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			d.m_speed.sample(m_size);
+			d.m_speed.sample(m_size * m_variants);
 			printSpeed();
 
 			if( m_quit ) {

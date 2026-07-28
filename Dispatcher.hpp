@@ -104,7 +104,7 @@ class Dispatcher {
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
@@ -144,6 +144,14 @@ class Dispatcher {
 		const size_t m_inverseStrip;
 		const size_t m_inverseGroup;
 		const size_t m_size;
+
+		// How many addresses a work item grades, which is how many a round is
+		// worth however many points went into it. The speed a run reports is in
+		// addresses and not in points, since it is the addresses that a search
+		// gets through and the points are an implementation detail of reaching
+		// them. One for a CREATE2 search, which hashes salts and not points.
+		const size_t m_variants;
+
 		cl_uchar m_clScoreMax;
 		const cl_uchar m_clScoreMin;
 		cl_uchar m_clScoreQuit;

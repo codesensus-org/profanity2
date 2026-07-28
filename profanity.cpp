@@ -279,6 +279,7 @@ int main(int argc, char * * argv) {
 		size_t inverseStrip = 0;
 		size_t inverseGroup = 0;
 		bool bMineContract = false;
+		bool bNegate = false;
 		std::string strFactory;
 		std::string strCaller;
 		std::string strInitCodeHash;
@@ -313,6 +314,7 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
 		argp.addSwitch('r', "min-score", scoreMin);
+		argp.addSwitch('N', "negate", bNegate);
 
 		if (!argp.parse()) {
 			std::cout << "error: bad arguments, try again :<" << std::endl;
@@ -457,7 +459,8 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_INVERSE_STRIP=" + toString(inverseStrip) + " -D PROFANITY_INVERSE_GROUP=" + toString(inverseGroup)
 			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA)
 			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
-			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER);
+			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER)
+			+ " -D PROFANITY_VARIANTS=" + toString(bNegate ? 2 : 1);
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
@@ -578,7 +581,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2, bNegate ? 2 : 1);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}

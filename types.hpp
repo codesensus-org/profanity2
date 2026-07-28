@@ -23,10 +23,21 @@ typedef struct {
     mp_number y;
 } point;
 
+// foundVariant says which of the addresses a point yields this result was, and
+// so what has to be done to the private key behind it. Kept in step with the
+// same struct in profanity.cl.
 typedef struct {
 	cl_uint found;
 	cl_uint foundId;
+	cl_uint foundVariant;
 	cl_uchar foundHash[20];
 } result;
+
+// A point itself, whose private key is the scalar the search prints unchanged.
+#define PROFANITY_VARIANT_POINT 0
+
+// Its negation, whose private key is that scalar's negation modulo the order of
+// the curve. Only ever found when the search was built to look at both.
+#define PROFANITY_VARIANT_NEGATED 1
 
 #endif /* HPP_TYPES */

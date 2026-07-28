@@ -43,6 +43,45 @@ $ python3
 >>> "%064x" % ((PRIVATE_KEY_A + PRIVATE_KEY_B) % 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141)
 ```
 
+### `--negate` and `PrivateNegated`: one more step
+
+`--negate` also scores the negation of every point a search reaches. `-P = (x,
+-y)` shares the point's x coordinate, so its address costs a second keccak rather
+than a second point addition — near twice the addresses for well under twice the
+work, measured at +62% on a CPU device. Benchmark it on your own card before
+leaving it on: what it is worth depends on what a keccak costs there relative to
+the rest of the loop.
+
+It is off unless asked for, because it changes what a run prints. With it, a
+search prints one of two words before its scalar, and the second wants the sum
+negated after it is added:
+
+| printed | private key of the address on the line |
+| --- | --- |
+| `Private: 0x…` | `(seed + printed) mod n` — the sum above, and nothing else |
+| `PrivateNegated: 0x…` | `-(seed + printed) mod n` — that sum, negated |
+
+where `n` is `FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`, the
+same modulus the sum is already taken over. In Python:
+
+```bash
+$ python3
+>>> n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+>>> "%064x" % (-(SEED_PRIVATE_KEY + PRINTED) % n)
+```
+
+Written `-x % n` rather than `n - x` so that the one input for which they differ,
+`x ≡ 0`, gives 0 rather than `n`. Neither is a usable private key, but the first
+is obviously not one. That input means the point is the identity, which cannot
+have an address and which profanity2's point addition cannot represent, so it is
+unreachable in both directions — this is tidiness and not a fix.
+
+About half of all results are the second kind. Adding the scalar and stopping, on
+such a line, leaves a private key that is perfectly valid and belongs to a
+different address than the one printed; check the address you derive against the
+one on the line before sending anything to it. Without `--negate` the word never
+appears and there is nothing here to get wrong.
+
 ### Leading zeros
 
 The combined private key must be used as a **64-symbol** hexadecimal string. Neither `bc` nor Python's `hex()` prints leading zeros, so whenever the sum has fewer than 64 symbols (about 1 chance in 16), pad it with leading zeros. The Python snippet above does this automatically thanks to `"%064x"`. Example:

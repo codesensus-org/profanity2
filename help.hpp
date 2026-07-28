@@ -12,6 +12,22 @@ usage: ./profanity2 [OPTIONS]
                             wanted by --create2, which searches over salts
                             rather than over keys.
 
+  Reading a result:
+    A search over keys prints the word Private before the scalar it found.
+    Add it to the private key behind your -z, and that sum is the private
+    key of the address on the line.
+
+    Under --negate a search prints a second word as well:
+
+      PrivateNegated   add it to the private key behind your -z as above,
+                       and then negate the sum modulo the order of the
+                       curve: key = -(yours + printed) mod n, where
+                       n = 0xfffffffffffffffffffffffffffffffe
+                           baaedce6af48a03bbfd25e8cd0364141
+
+    Without --negate no line ever carries that word, so anything reading
+    these lines goes on reading them as it always has.
+
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
     --zeros                 Score on zeros anywhere in hash.
@@ -87,6 +103,21 @@ usage: ./profanity2 [OPTIONS]
                             from taking minutes.
 
   Tweaking:
+    -N, --negate            Also score the negation of every point reached.
+                            -P = (x, -y) shares the point's x coordinate, so
+                            its address costs a second keccak rather than a
+                            second point addition: near twice the addresses
+                            for well under twice the work. Measured at +62%
+                            on a CPU device; what it is worth on a given card
+                            depends on what a keccak costs there relative to
+                            the rest of the loop, so benchmark it against a
+                            run without it.
+
+                            Half the results then arrive as PrivateNegated
+                            rather than Private and want one more step to
+                            reach the private key -- see "Reading a result"
+                            above. Off unless asked for, since anything
+                            reading the output has to know the difference.
     -w, --work <size>       Set OpenCL local work size. [default = 64]
     -W, --work-max <size>   Set OpenCL maximum work size. [default = -i * -I]
     -i, --inverse-size      Set size of modular inverses to calculate in one

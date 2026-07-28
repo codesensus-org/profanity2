@@ -43,6 +43,14 @@
 /* ------------------------------------------------------------------------ */
 /* Multiprecision functions                                                 */
 /* ------------------------------------------------------------------------ */
+// How many addresses one point addition is worth. At one, the point itself; at
+// two, its negation as well, which shares the point's x coordinate and so costs
+// a keccak rather than another point addition. The host passes it in, and knows
+// what to do with the private key behind each — see profanity_iterate.
+#if PROFANITY_VARIANTS != 1 && PROFANITY_VARIANTS != 2
+#error "PROFANITY_VARIANTS must be 1 or 2"
+#endif
+
 #define MP_WORDS 8
 #define MP_BITS 32
 #define bswap32(n) (rotate(n & 0x00FF00FF, 24U)|(rotate(n, 8U) & 0x00FF00FF))
@@ -435,9 +443,14 @@ void point_add(point * const r, point * const p, point * const o) {
 /* ------------------------------------------------------------------------ */
 /* Profanity.                                                               */
 /* ------------------------------------------------------------------------ */
+// foundVariant says which of the addresses a point yields this one was, and so
+// what has to be done to the private key behind it — see PROFANITY_VARIANTS and
+// profanity_iterate. Zero is the point itself, whose key is the scalar the host
+// prints unchanged; one is its negation, whose key is that scalar's.
 typedef struct {
 	uint found;
 	uint foundId;
+	uint foundVariant;
 	uchar foundHash[20];
 } result;
 
@@ -751,57 +764,30 @@ static inline uchar profanity_byte(const uint * const address, const int i) {
 // in hopes that using constant storage instead of private storage
 // will aid speeds.
 //
-// After the above point addition this calculates the public address
-// corresponding to the point and returns it in private memory, where the
-// scoring below grades it without a round trip through global memory.
-static inline void profanity_iterate(__global mp_number * const pDeltaX, __global const mp_number * const pInverse, __global mp_number * const pPrevLambda, const size_t id, const uchar bContract, uint * const address) {
-	// negativeGx = 0x8641998106234453aa5f9d6a3178f4f8fd640324d231d726a60d7ea3e907e497
-	mp_number negativeGx = { {0xe907e497, 0xa60d7ea3, 0xd231d726, 0xfd640324, 0x3178f4f8, 0xaa5f9d6a, 0x06234453, 0x86419981 } };
-
+// The address a point hashes to, in private memory, where the scoring below
+// grades it without a round trip through global memory. Split out of
+// profanity_iterate so that one point can be hashed more than once: with
+// PROFANITY_VARIANTS at two it is called for the point and for its negation.
+static inline void profanity_address(const mp_number * const x, const mp_number * const y, const uchar bContract, uint * const address) {
 	ethhash h = { { 0 } };
 
-	mp_number dX = pDeltaX[id];
-	mp_number tmp = pInverse[id];
-	mp_number lambda = pPrevLambda[id];
-
-	// λ' = - (2G_y) / d' - λ <=> lambda := pInversedNegativeDoubleGy[id] - pPrevLambda[id]
-	mp_mod_sub(&lambda, &tmp, &lambda);
-
-	// λ² = λ * λ <=> tmp := lambda * lambda = λ²
-	mp_mod_mul(&tmp, &lambda, &lambda);
-
-	// d' = λ² - d - 3g = (-3g) - (d - λ²) <=> x := tripleNegativeGx - (x - tmp)
-	mp_mod_sub(&dX, &dX, &tmp);
-	mp_mod_sub_const(&dX, &tripleNegativeGx, &dX);
-
-	pDeltaX[id] = dX;
-	pPrevLambda[id] = lambda;
-
-	// Calculate y from dX and lambda
-	// y' = (-G_Y) - λ * d' <=> p.y := negativeGy - (p.y * p.x)
-	mp_mod_mul(&tmp, &lambda, &dX);
-	mp_mod_sub_const(&tmp, &negativeGy, &tmp);
-
-	// Restore X coordinate from delta value
-	mp_mod_sub(&dX, &dX, &negativeGx);
-
 	// Initialize Keccak structure with point coordinates in big endian
-	h.d[0] = bswap32(dX.d[MP_WORDS - 1]);
-	h.d[1] = bswap32(dX.d[MP_WORDS - 2]);
-	h.d[2] = bswap32(dX.d[MP_WORDS - 3]);
-	h.d[3] = bswap32(dX.d[MP_WORDS - 4]);
-	h.d[4] = bswap32(dX.d[MP_WORDS - 5]);
-	h.d[5] = bswap32(dX.d[MP_WORDS - 6]);
-	h.d[6] = bswap32(dX.d[MP_WORDS - 7]);
-	h.d[7] = bswap32(dX.d[MP_WORDS - 8]);
-	h.d[8] = bswap32(tmp.d[MP_WORDS - 1]);
-	h.d[9] = bswap32(tmp.d[MP_WORDS - 2]);
-	h.d[10] = bswap32(tmp.d[MP_WORDS - 3]);
-	h.d[11] = bswap32(tmp.d[MP_WORDS - 4]);
-	h.d[12] = bswap32(tmp.d[MP_WORDS - 5]);
-	h.d[13] = bswap32(tmp.d[MP_WORDS - 6]);
-	h.d[14] = bswap32(tmp.d[MP_WORDS - 7]);
-	h.d[15] = bswap32(tmp.d[MP_WORDS - 8]);
+	h.d[0] = bswap32(x->d[MP_WORDS - 1]);
+	h.d[1] = bswap32(x->d[MP_WORDS - 2]);
+	h.d[2] = bswap32(x->d[MP_WORDS - 3]);
+	h.d[3] = bswap32(x->d[MP_WORDS - 4]);
+	h.d[4] = bswap32(x->d[MP_WORDS - 5]);
+	h.d[5] = bswap32(x->d[MP_WORDS - 6]);
+	h.d[6] = bswap32(x->d[MP_WORDS - 7]);
+	h.d[7] = bswap32(x->d[MP_WORDS - 8]);
+	h.d[8] = bswap32(y->d[MP_WORDS - 1]);
+	h.d[9] = bswap32(y->d[MP_WORDS - 2]);
+	h.d[10] = bswap32(y->d[MP_WORDS - 3]);
+	h.d[11] = bswap32(y->d[MP_WORDS - 4]);
+	h.d[12] = bswap32(y->d[MP_WORDS - 5]);
+	h.d[13] = bswap32(y->d[MP_WORDS - 6]);
+	h.d[14] = bswap32(y->d[MP_WORDS - 7]);
+	h.d[15] = bswap32(y->d[MP_WORDS - 8]);
 	h.d[16] ^= 0x01; // length 64
 
 	sha3_keccakf(&h);
@@ -835,6 +821,56 @@ static inline void profanity_iterate(__global mp_number * const pDeltaX, __globa
 	}
 }
 
+// After the above point addition this calculates the public address or
+// addresses corresponding to the point, and writes five words for each into
+// `addresses`. There are PROFANITY_VARIANTS of them.
+static inline void profanity_iterate(__global mp_number * const pDeltaX, __global mp_number * const pInverse, __global mp_number * const pPrevLambda, const size_t id, const uchar bContract, uint * const addresses) {
+	// negativeGx = 0x8641998106234453aa5f9d6a3178f4f8fd640324d231d726a60d7ea3e907e497
+	mp_number negativeGx = { {0xe907e497, 0xa60d7ea3, 0xd231d726, 0xfd640324, 0x3178f4f8, 0xaa5f9d6a, 0x06234453, 0x86419981 } };
+
+	mp_number dX = pDeltaX[id];
+	mp_number tmp = pInverse[id];
+	mp_number lambda = pPrevLambda[id];
+
+	// λ' = - (2G_y) / d' - λ <=> lambda := pInversedNegativeDoubleGy[id] - pPrevLambda[id]
+	mp_mod_sub(&lambda, &tmp, &lambda);
+
+	// λ² = λ * λ <=> tmp := lambda * lambda = λ²
+	mp_mod_mul(&tmp, &lambda, &lambda);
+
+	// d' = λ² - d - 3g = (-3g) - (d - λ²) <=> x := tripleNegativeGx - (x - tmp)
+	mp_mod_sub(&dX, &dX, &tmp);
+	mp_mod_sub_const(&dX, &tripleNegativeGx, &dX);
+
+	pDeltaX[id] = dX;
+	pPrevLambda[id] = lambda;
+
+	// Calculate y from dX and lambda
+	// y' = (-G_Y) - λ * d' <=> p.y := negativeGy - (p.y * p.x)
+	mp_mod_mul(&tmp, &lambda, &dX);
+	mp_mod_sub_const(&tmp, &negativeGy, &tmp);
+
+	// Restore X coordinate from delta value
+	mp_mod_sub(&dX, &dX, &negativeGx);
+
+	profanity_address(&dX, &tmp, bContract, addresses);
+
+#if PROFANITY_VARIANTS > 1
+	// -P = (x, -y) shares this point's x, so a second address costs one modular
+	// subtraction and a second keccak rather than another point addition. Its
+	// private key is this one's negated, mod the order of the curve, which is
+	// why a result carries the variant it was found at.
+	//
+	// mod - y rather than 0 - y: y is never zero here, since that would be a
+	// point of order two and this curve has none, so the subtraction can never
+	// borrow and what it leaves is already reduced.
+	mp_number negY;
+	mp_mod_sub_const(&negY, &mod, &tmp);
+
+	profanity_address(&dX, &negY, bContract, addresses + 5);
+#endif
+}
+
 // The i'th character of the address as it would be written out: the high nibble
 // of a byte comes first, so an even index takes the top half of byte i / 2.
 static inline uchar profanity_nibble(const uint * const address, const int i) {
@@ -851,7 +887,7 @@ static inline uchar profanity_written_nibble(const uint * const written, const i
 	return (uchar)((written[i >> 3] >> ((i & 7) << 2)) & 0xF);
 }
 
-void profanity_result_update(const size_t id, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax, const uchar bAppend) {
+void profanity_result_update(const size_t id, const uint variant, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax, const uchar bAppend) {
 	if (!score || score <= scoreMax) {
 		return;
 	}
@@ -869,6 +905,7 @@ void profanity_result_update(const size_t id, const uint * const address, __glob
 		if (at < PROFANITY_MAX_SCORE) {
 			pResult[at + 1].found = score;
 			pResult[at + 1].foundId = id;
+			pResult[at + 1].foundVariant = variant;
 
 			for (int i = 0; i < 20; ++i) {
 				pResult[at + 1].foundHash[i] = profanity_byte(address, i);
@@ -883,6 +920,7 @@ void profanity_result_update(const size_t id, const uint * const address, __glob
 	// Save only one result for each score, the first.
 	if (hasResult == 0) {
 		pResult[score].foundId = id;
+		pResult[score].foundVariant = variant;
 
 		for (int i = 0; i < 20; ++i) {
 			pResult[score].foundHash[i] = profanity_byte(address, i);
@@ -1196,6 +1234,22 @@ static inline int profanity_score_fn_doubles(const uint * const address, __const
 	return score;
 }
 
+// Grades the variant'th of the addresses profanity_iterate wrote. Spelled out
+// per variant rather than looped so that the index into `addresses` stays a
+// constant and the array stays in registers.
+#define PROFANITY_SCORE_ONE(NAME, V) \
+	{ \
+		const uint * const address = addresses + (V) * 5; \
+		const int score = profanity_score_fn_##NAME(address, data1, data2); \
+		profanity_result_update(id, (V), address, pResult, score, scoreMax, bAppend); \
+	}
+
+#if PROFANITY_VARIANTS > 1
+#define PROFANITY_SCORE_VARIANTS(NAME) PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1)
+#else
+#define PROFANITY_SCORE_VARIANTS(NAME) PROFANITY_SCORE_ONE(NAME, 0)
+#endif
+
 // One kernel per scoring mode, each taking a candidate from the point addition
 // through to its score. bContract is uniform across the launch and selects the
 // second hash that turns a sender into the contract it deploys at nonce 0.
@@ -1211,10 +1265,9 @@ __kernel void profanity_iterate_score_##NAME( \
 		const uchar bAppend, \
 		const uchar bContract) { \
 	const size_t id = get_global_id(0); \
-	uint address[5]; \
-	profanity_iterate(pDeltaX, pInverse, pPrevLambda, id, bContract, address); \
-	const int score = profanity_score_fn_##NAME(address, data1, data2); \
-	profanity_result_update(id, address, pResult, score, scoreMax, bAppend); \
+	uint addresses[PROFANITY_VARIANTS * 5]; \
+	profanity_iterate(pDeltaX, pInverse, pPrevLambda, id, bContract, addresses); \
+	PROFANITY_SCORE_VARIANTS(NAME) \
 }
 
 PROFANITY_SCORE_KERNEL(benchmark)
@@ -1291,7 +1344,7 @@ __kernel void profanity_create2_score_##NAME( \
 	uint address[5]; \
 	profanity_create2(pTemplate, counterBase + id, address); \
 	const int score = profanity_score_fn_##NAME(address, data1, data2); \
-	profanity_result_update(id, address, pResult, score, scoreMax, bAppend); \
+	profanity_result_update(id, 0, address, pResult, score, scoreMax, bAppend); \
 }
 
 PROFANITY_CREATE2_KERNEL(benchmark)
