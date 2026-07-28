@@ -651,21 +651,39 @@ void Dispatcher::handleFloorResult(Device & d) {
 // out by name on the line, so whatever reads it does not have to know which
 // search produced it before it can read it.
 //
-// A negated result is named apart rather than flagged alongside, for the same
-// reason. The scalar on such a line is added to the seed key as ever, but the
-// sum is then negated modulo the order of the curve, and a reader that has not
-// been taught the difference stands to derive a key for the wrong address from
-// it. Under a name of its own it goes unread by such a reader instead, which
-// loses the result and not the funds that would be sent to it.
+// A scalar the sum of which has to be worked on further is named apart rather
+// than flagged alongside, for the same reason. Such a line carries the same
+// scalar as any other and is added to the seed key as ever, but the sum then
+// wants negating, or multiplying by λ, or both, and a reader that has not been
+// taught the difference stands to derive a key for the wrong address from it.
+// Under a name of its own it goes unread by such a reader instead, which loses
+// the result and not the funds that would be sent to it.
+static const char * const g_variantNames[] = {
+	"Private",
+	"PrivateNegated",
+	"PrivateLambda",
+	"PrivateLambdaNegated",
+	"PrivateLambda2",
+	"PrivateLambda2Negated",
+};
+
 void Dispatcher::report(Device & d, const result & r, const cl_uchar score) {
 	if (m_mode.target == CREATE2) {
 		printResult("Salt", saltFor(d.m_salt, d.m_counterFound + r.foundId), r, score, timeStart, m_mode);
 		return;
 	}
 
-	const char * const what = r.foundVariant == PROFANITY_VARIANT_NEGATED ? "PrivateNegated" : "Private";
+	// A variant the host has no name for would be printed as one it does, and
+	// the scalar derived from under the wrong transform, so refuse it instead.
+	// Only a kernel and a host built apart could produce one.
+	const size_t named = sizeof(g_variantNames) / sizeof(g_variantNames[0]);
+	if (r.foundVariant >= named) {
+		std::cout << "\33[2K\r  error: kernel reported variant " << r.foundVariant
+			<< ", which this build has no derivation for; the result is dropped" << std::endl;
+		return;
+	}
 
-	printResult(what, privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
+	printResult(g_variantNames[r.foundVariant], privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
 }
 
 void Dispatcher::handleResult(Device & d) {

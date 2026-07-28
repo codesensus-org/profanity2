@@ -33,11 +33,24 @@ typedef struct {
 	cl_uchar foundHash[20];
 } result;
 
-// A point itself, whose private key is the scalar the search prints unchanged.
+// The six addresses one point addition can be worth, and what each does to the
+// scalar a search prints to reach the private key behind it. λ is the scalar
+// the curve's endomorphism multiplies by, and n the order of the curve.
+//
+//   POINT             s          the scalar unchanged
+//   NEGATED          -s
+//   LAMBDA            λs
+//   LAMBDA_NEGATED   -λs
+//   LAMBDA2           λ²s
+//   LAMBDA2_NEGATED  -λ²s
+//
+// all taken mod n. Which of them a search can find depends on what it was
+// built to look at: one, the first; two, the first pair; six, all of them.
 #define PROFANITY_VARIANT_POINT 0
-
-// Its negation, whose private key is that scalar's negation modulo the order of
-// the curve. Only ever found when the search was built to look at both.
 #define PROFANITY_VARIANT_NEGATED 1
+#define PROFANITY_VARIANT_LAMBDA 2
+#define PROFANITY_VARIANT_LAMBDA_NEGATED 3
+#define PROFANITY_VARIANT_LAMBDA2 4
+#define PROFANITY_VARIANT_LAMBDA2_NEGATED 5
 
 #endif /* HPP_TYPES */

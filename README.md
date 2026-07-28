@@ -43,44 +43,78 @@ $ python3
 >>> "%064x" % ((PRIVATE_KEY_A + PRIVATE_KEY_B) % 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141)
 ```
 
-### `--negate` and `PrivateNegated`: one more step
+### `--variants`: more addresses per point, and one more step
 
-`--negate` also scores the negation of every point a search reaches. `-P = (x,
--y)` shares the point's x coordinate, so its address costs a second keccak rather
-than a second point addition — near twice the addresses for well under twice the
-work, measured at +62% on a CPU device. Benchmark it on your own card before
-leaving it on: what it is worth depends on what a keccak costs there relative to
-the rest of the loop.
+`--variants <1-6>` scores more than one address per point addition. Every point
+is worth up to six that cost no point arithmetic to reach:
 
-It is off unless asked for, because it changes what a run prints. With it, a
-search prints one of two words before its scalar, and the second wants the sum
-negated after it is added:
+| `--variants` | also scores | costing |
+| --- | --- | --- |
+| 1 | `P`, the point itself | — |
+| 2 | `-P = (x, -y)` | a modular subtraction |
+| 3 | `psi(P) = (beta*x, y)` | a modular multiplication |
+| 4 | `-psi(P)` | — |
+| 5 | `psi^2(P) = (beta^2*x, y)` | one more multiplication |
+| 6 | `-psi^2(P)` | — |
 
-| printed | private key of the address on the line |
-| --- | --- |
-| `Private: 0x…` | `(seed + printed) mod n` — the sum above, and nothing else |
-| `PrivateNegated: 0x…` | `-(seed + printed) mod n` — that sum, negated |
+so each extra address costs a keccak where another point would cost a point
+addition. Measured on a CPU device at +62% for 2 and +145% for 6.
 
-where `n` is `FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`, the
-same modulus the sum is already taken over. In Python:
+**Six is the ceiling**, and a property of the curve rather than of this program.
+Those six maps are the *automorphisms* of the curve — the maps `E -> E` that need
+no point arithmetic — and secp256k1 is `y^2 = x^3 + 7`, so its j-invariant is
+zero and its automorphism group is the sixth roots of unity, `{±1, ±w, ±w^2}`.
+A group of order six has no seventh element, so there is no 7- or 8-way to find.
+Anything further needs an endomorphism of degree above one, which is a point
+addition by another name — and the batch inversion already amortizes those
+better than this would.
+
+Benchmark rather than assuming 6 wins. What the extra addresses are worth depends
+on what a keccak costs on your card relative to the rest of the loop, and the
+higher counts hold more live across the hash, where lost occupancy can take back
+what the arithmetic saves.
+
+Above 1, a search prints one of several words before its scalar, each saying what
+to do to the sum after adding it to your seed key. Writing `s` for that sum:
+
+| printed | private key of the address on the line | from |
+| --- | --- | --- |
+| `Private: 0x…` | `s` — the sum above, and nothing else | 1 |
+| `PrivateNegated: 0x…` | `-s mod n` | 2 |
+| `PrivateLambda: 0x…` | `lambda * s mod n` | 3 |
+| `PrivateLambdaNegated: 0x…` | `-lambda * s mod n` | 4 |
+| `PrivateLambda2: 0x…` | `lambda^2 * s mod n` | 5 |
+| `PrivateLambda2Negated: 0x…` | `-lambda^2 * s mod n` | 6 |
+
+`n` is `FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`, the same
+modulus the sum is already taken over, and `lambda` is
+`5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72`. Since
+`lambda^3 = 1 mod n`, `lambda^2` is also `lambda`'s inverse. In Python:
 
 ```bash
 $ python3
 >>> n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
->>> "%064x" % (-(SEED_PRIVATE_KEY + PRINTED) % n)
+>>> lam = 0x5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72
+>>> s = (SEED_PRIVATE_KEY + PRINTED) % n
+>>> "%064x" % (s % n)              # Private
+>>> "%064x" % (-s % n)             # PrivateNegated
+>>> "%064x" % (lam * s % n)        # PrivateLambda
+>>> "%064x" % (-lam * s % n)       # PrivateLambdaNegated
+>>> "%064x" % (lam * lam * s % n)  # PrivateLambda2
+>>> "%064x" % (-lam * lam * s % n) # PrivateLambda2Negated
 ```
 
 Written `-x % n` rather than `n - x` so that the one input for which they differ,
-`x ≡ 0`, gives 0 rather than `n`. Neither is a usable private key, but the first
+`x = 0`, gives 0 rather than `n`. Neither is a usable private key, but the first
 is obviously not one. That input means the point is the identity, which cannot
 have an address and which profanity2's point addition cannot represent, so it is
 unreachable in both directions — this is tidiness and not a fix.
 
-About half of all results are the second kind. Adding the scalar and stopping, on
-such a line, leaves a private key that is perfectly valid and belongs to a
-different address than the one printed; check the address you derive against the
-one on the line before sending anything to it. Without `--negate` the word never
-appears and there is nothing here to get wrong.
+At `--variants 6` five results in six are one of the transformed kinds. Adding
+the scalar and stopping, on such a line, leaves a private key that is perfectly
+valid and belongs to a different address than the one printed; check the address
+you derive against the one on the line before sending anything to it. At the
+default of 1 the extra words never appear and there is nothing here to get wrong.
 
 ### Leading zeros
 
@@ -145,6 +179,34 @@ usage: ./profanity2 [OPTIONS]
                             to the "profanity2" resulting private key. Not
                             wanted by --create2, which searches over salts
                             rather than over keys.
+
+  Reading a result:
+    A search over keys prints the word Private before the scalar it found.
+    Add it to the private key behind your -z, and that sum is the private
+    key of the address on the line.
+
+    Under --variants a search prints other words as well. Each means the
+    same scalar added to the same seed key, with the sum then worked on.
+    Writing s for that sum, n for the order of the curve and lambda for
+    the scalar the curve's endomorphism multiplies by:
+
+      1  Private                 s
+      2  PrivateNegated         -s
+      3  PrivateLambda           lambda * s
+      4  PrivateLambdaNegated   -lambda * s
+      5  PrivateLambda2          lambda^2 * s
+      6  PrivateLambda2Negated  -lambda^2 * s
+
+    all taken mod n, the number on the left being the lowest --variants
+    that can print it. Where
+
+      n      = 0xfffffffffffffffffffffffffffffffe
+               baaedce6af48a03bbfd25e8cd0364141
+      lambda = 0x5363ad4cc05c30e0a5261c028812645a
+               122e22ea20816678df02967c1b23bd72
+
+    At the default of 1 nothing but Private is ever printed, so anything
+    reading these lines goes on reading them as it always has.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -221,6 +283,38 @@ usage: ./profanity2 [OPTIONS]
                             from taking minutes.
 
   Tweaking:
+    -V, --variants <1-6>    How many addresses to score per point addition.
+                            [default = 1]
+
+                            Every point is worth up to six addresses that
+                            cost no point arithmetic to reach: itself, its
+                            negation (x, -y), the two images of it under
+                            the curve's endomorphism (b*x, y) and (b^2*x,
+                            y), and the negations of those. A negation
+                            costs a modular subtraction and an image a
+                            modular multiplication, so each extra address
+                            costs a keccak where another point would cost
+                            a point addition.
+
+                            Six is the ceiling, and not a limit of this
+                            program: those six maps are the automorphisms
+                            of the curve, and secp256k1 being y^2 = x^3 + 7
+                            its automorphism group is the sixth roots of
+                            unity. There is no seventh such map. Anything
+                            further needs an endomorphism of degree above
+                            one, which is a point addition by another name.
+
+                            What the extra addresses are worth depends on
+                            what a keccak costs on the card relative to the
+                            rest of the loop, and the higher counts hold
+                            more live across the hash, where lost occupancy
+                            can take back what the arithmetic saves. So
+                            benchmark it rather than assuming six wins.
+
+                            Above 1, results arrive under the other words
+                            listed in "Reading a result" above and want a
+                            transform to reach the private key. At 6 that
+                            is five results in six.
     -w, --work <size>       Set OpenCL local work size. [default = 64]
     -W, --work-max <size>   Set OpenCL maximum work size. [default = -i * -I]
     -i, --inverse-size      Set size of modular inverses to calculate in one
@@ -229,6 +323,20 @@ usage: ./profanity2 [OPTIONS]
                             parallell. [default = 16384]
                             A --create2 search inverts nothing, but -i * -I is
                             still how many candidates a round covers.
+    -S, --inverse-strip     Enable two-level inversion, with this many points
+                            batched per work item. [default = 0, disabled]
+    -G, --inverse-group     Work group size sharing a single inverse when
+                            two-level inversion is enabled. Must be a power of
+                            two. [default = 0, disabled]
+
+  Two-level inversion:
+    With -S and -G a work group cooperates on one modular inverse instead of
+    each work item doing its own, which is much faster on some GPUs and much
+    slower on others. Both switches must be given together, and
+    -i * -I must be a multiple of -S * -G. Benchmark before using it:
+      RTX 4090   -S 8 -G 128    +38% over the default
+      RTX 3060   -S 8 -G 128    -29% over the default
+      GTX 1070   -S 8 -G 128    -62% over the default
 
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -240,7 +348,6 @@ usage: ./profanity2 [OPTIONS]
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --contract --leading 0 -z HEX_PUBLIC_KEY_128_CHARS_LONG
-    ./profanity2 --contract --zero-bytes -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH --zero-bytes
     ./profanity2 --create2 FACTORY_ADDRESS --init-code-hash INIT_CODE_HASH \
                  --caller YOUR_ADDRESS --matching deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --min-score 4

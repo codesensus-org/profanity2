@@ -43,12 +43,26 @@
 /* ------------------------------------------------------------------------ */
 /* Multiprecision functions                                                 */
 /* ------------------------------------------------------------------------ */
-// How many addresses one point addition is worth. At one, the point itself; at
-// two, its negation as well, which shares the point's x coordinate and so costs
-// a keccak rather than another point addition. The host passes it in, and knows
-// what to do with the private key behind each — see profanity_iterate.
-#if PROFANITY_VARIANTS != 1 && PROFANITY_VARIANTS != 2
-#error "PROFANITY_VARIANTS must be 1 or 2"
+// How many addresses one point addition is worth, in the order they are taken:
+//
+//   1  P            the point itself
+//   2  -P           its negation, (x, -y), free but for a subtraction
+//   3  ψ(P)         (βx, y), one modular multiplication
+//   4  -ψ(P)
+//   5  ψ²(P)        (β²x, y), one more multiplication
+//   6  -ψ²(P)
+//
+// Six is the ceiling and not a choice of implementation. These are the
+// automorphisms of the curve — the maps E → E that cost no point arithmetic —
+// and secp256k1 is y² = x³ + 7, so its j-invariant is zero and its automorphism
+// group is the sixth roots of unity, {±1, ±ω, ±ω²}. That group has order six, so
+// there is no seventh such map to find. Anything further wants an endomorphism
+// of degree above one, which is point arithmetic again by another name.
+//
+// The host passes the count in, and knows what to do with the private key behind
+// each of them — see profanity_iterate.
+#if PROFANITY_VARIANTS < 1 || PROFANITY_VARIANTS > 6
+#error "PROFANITY_VARIANTS must be between 1 and 6"
 #endif
 
 #define MP_WORDS 8
@@ -869,6 +883,44 @@ static inline void profanity_iterate(__global mp_number * const pDeltaX, __globa
 
 	profanity_address(&dX, &negY, bContract, addresses + 5);
 #endif
+
+#if PROFANITY_VARIANTS > 2
+	// secp256k1 has an endomorphism ψ(x, y) = (βx, y), and ψ(P) = λP for a λ
+	// that cubes to one modulo the order of the curve. So βx is another point's
+	// x coordinate for one modular multiplication, and β²x a third's for one
+	// more — six addresses in all once each is taken with its negation, off a
+	// single point addition.
+	//
+	// β² is not carried as a constant of its own: β²x is β(βx), which reuses
+	// the register the first product is already in.
+	//
+	// Done after the two above rather than alongside them so that only one of
+	// the two products is ever live at once. Everything here is held across a
+	// keccak, whose state is fifty registers on its own, and what that costs in
+	// occupancy is the thing most likely to take back what the arithmetic saves.
+	//
+	// beta = 0x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee
+	mp_number beta = { {0x719501ee, 0xc1396c28, 0x12f58995, 0x9cf04975, 0xac3434e9, 0x6e64479e, 0x657c0710, 0x7ae96a2b} };
+
+	mp_number betaX;
+	mp_mod_mul(&betaX, &dX, &beta);
+
+	profanity_address(&betaX, &tmp, bContract, addresses + 10);
+#endif
+
+#if PROFANITY_VARIANTS > 3
+	profanity_address(&betaX, &negY, bContract, addresses + 15);
+#endif
+
+#if PROFANITY_VARIANTS > 4
+	mp_mod_mul(&betaX, &betaX, &beta);
+
+	profanity_address(&betaX, &tmp, bContract, addresses + 20);
+#endif
+
+#if PROFANITY_VARIANTS > 5
+	profanity_address(&betaX, &negY, bContract, addresses + 25);
+#endif
 }
 
 // The i'th character of the address as it would be written out: the high nibble
@@ -1244,10 +1296,33 @@ static inline int profanity_score_fn_doubles(const uint * const address, __const
 		profanity_result_update(id, (V), address, pResult, score, scoreMax, bAppend); \
 	}
 
-#if PROFANITY_VARIANTS > 1
-#define PROFANITY_SCORE_VARIANTS(NAME) PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1)
+// Spelled out per count rather than looped, for the same reason as above: the
+// index into `addresses` has to stay a constant for the array to stay in
+// registers.
+#if PROFANITY_VARIANTS == 1
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0)
+#elif PROFANITY_VARIANTS == 2
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1)
+#elif PROFANITY_VARIANTS == 3
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1) \
+	PROFANITY_SCORE_ONE(NAME, 2)
+#elif PROFANITY_VARIANTS == 4
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1) \
+	PROFANITY_SCORE_ONE(NAME, 2) PROFANITY_SCORE_ONE(NAME, 3)
+#elif PROFANITY_VARIANTS == 5
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1) \
+	PROFANITY_SCORE_ONE(NAME, 2) PROFANITY_SCORE_ONE(NAME, 3) \
+	PROFANITY_SCORE_ONE(NAME, 4)
 #else
-#define PROFANITY_SCORE_VARIANTS(NAME) PROFANITY_SCORE_ONE(NAME, 0)
+#define PROFANITY_SCORE_VARIANTS(NAME) \
+	PROFANITY_SCORE_ONE(NAME, 0) PROFANITY_SCORE_ONE(NAME, 1) \
+	PROFANITY_SCORE_ONE(NAME, 2) PROFANITY_SCORE_ONE(NAME, 3) \
+	PROFANITY_SCORE_ONE(NAME, 4) PROFANITY_SCORE_ONE(NAME, 5)
 #endif
 
 // One kernel per scoring mode, each taking a candidate from the point addition

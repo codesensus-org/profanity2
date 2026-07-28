@@ -17,16 +17,28 @@ usage: ./profanity2 [OPTIONS]
     Add it to the private key behind your -z, and that sum is the private
     key of the address on the line.
 
-    Under --negate a search prints a second word as well:
+    Under --variants a search prints other words as well. Each means the
+    same scalar added to the same seed key, with the sum then worked on.
+    Writing s for that sum, n for the order of the curve and lambda for
+    the scalar the curve's endomorphism multiplies by:
 
-      PrivateNegated   add it to the private key behind your -z as above,
-                       and then negate the sum modulo the order of the
-                       curve: key = -(yours + printed) mod n, where
-                       n = 0xfffffffffffffffffffffffffffffffe
-                           baaedce6af48a03bbfd25e8cd0364141
+      1  Private                 s
+      2  PrivateNegated         -s
+      3  PrivateLambda           lambda * s
+      4  PrivateLambdaNegated   -lambda * s
+      5  PrivateLambda2          lambda^2 * s
+      6  PrivateLambda2Negated  -lambda^2 * s
 
-    Without --negate no line ever carries that word, so anything reading
-    these lines goes on reading them as it always has.
+    all taken mod n, the number on the left being the lowest --variants
+    that can print it. Where
+
+      n      = 0xfffffffffffffffffffffffffffffffe
+               baaedce6af48a03bbfd25e8cd0364141
+      lambda = 0x5363ad4cc05c30e0a5261c028812645a
+               122e22ea20816678df02967c1b23bd72
+
+    At the default of 1 nothing but Private is ever printed, so anything
+    reading these lines goes on reading them as it always has.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -103,21 +115,38 @@ usage: ./profanity2 [OPTIONS]
                             from taking minutes.
 
   Tweaking:
-    -N, --negate            Also score the negation of every point reached.
-                            -P = (x, -y) shares the point's x coordinate, so
-                            its address costs a second keccak rather than a
-                            second point addition: near twice the addresses
-                            for well under twice the work. Measured at +62%
-                            on a CPU device; what it is worth on a given card
-                            depends on what a keccak costs there relative to
-                            the rest of the loop, so benchmark it against a
-                            run without it.
+    -V, --variants <1-6>    How many addresses to score per point addition.
+                            [default = 1]
 
-                            Half the results then arrive as PrivateNegated
-                            rather than Private and want one more step to
-                            reach the private key -- see "Reading a result"
-                            above. Off unless asked for, since anything
-                            reading the output has to know the difference.
+                            Every point is worth up to six addresses that
+                            cost no point arithmetic to reach: itself, its
+                            negation (x, -y), the two images of it under
+                            the curve's endomorphism (b*x, y) and (b^2*x,
+                            y), and the negations of those. A negation
+                            costs a modular subtraction and an image a
+                            modular multiplication, so each extra address
+                            costs a keccak where another point would cost
+                            a point addition.
+
+                            Six is the ceiling, and not a limit of this
+                            program: those six maps are the automorphisms
+                            of the curve, and secp256k1 being y^2 = x^3 + 7
+                            its automorphism group is the sixth roots of
+                            unity. There is no seventh such map. Anything
+                            further needs an endomorphism of degree above
+                            one, which is a point addition by another name.
+
+                            What the extra addresses are worth depends on
+                            what a keccak costs on the card relative to the
+                            rest of the loop, and the higher counts hold
+                            more live across the hash, where lost occupancy
+                            can take back what the arithmetic saves. So
+                            benchmark it rather than assuming six wins.
+
+                            Above 1, results arrive under the other words
+                            listed in "Reading a result" above and want a
+                            transform to reach the private key. At 6 that
+                            is five results in six.
     -w, --work <size>       Set OpenCL local work size. [default = 64]
     -W, --work-max <size>   Set OpenCL maximum work size. [default = -i * -I]
     -i, --inverse-size      Set size of modular inverses to calculate in one

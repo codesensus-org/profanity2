@@ -279,7 +279,7 @@ int main(int argc, char * * argv) {
 		size_t inverseStrip = 0;
 		size_t inverseGroup = 0;
 		bool bMineContract = false;
-		bool bNegate = false;
+		size_t variants = 1;
 		std::string strFactory;
 		std::string strCaller;
 		std::string strInitCodeHash;
@@ -314,7 +314,7 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
 		argp.addSwitch('r', "min-score", scoreMin);
-		argp.addSwitch('N', "negate", bNegate);
+		argp.addSwitch('V', "variants", variants);
 
 		if (!argp.parse()) {
 			std::cout << "error: bad arguments, try again :<" << std::endl;
@@ -328,6 +328,17 @@ int main(int argc, char * * argv) {
 
 		if ((inverseStrip == 0) != (inverseGroup == 0)) {
 			std::cout << "error: --inverse-strip and --inverse-group must both be zero (disabled) or both be non-zero" << std::endl;
+			return 1;
+		}
+
+		// Six is the order of the curve's automorphism group and so the most
+		// addresses one point addition can be worth. Refused rather than clamped:
+		// a run asked for more than there is would otherwise report a speed for
+		// work it never did.
+		if (variants < 1 || variants > 6) {
+			std::cout << "error: --variants must be between 1 and 6, got " << variants << std::endl;
+			std::cout << "  secp256k1 has six automorphisms and each is worth one address per point;" << std::endl;
+			std::cout << "  a seventh would cost a point addition, which is what this is saving." << std::endl;
 			return 1;
 		}
 
@@ -460,7 +471,7 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA)
 			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
 			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER)
-			+ " -D PROFANITY_VARIANTS=" + toString(bNegate ? 2 : 1);
+			+ " -D PROFANITY_VARIANTS=" + toString(variants);
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
@@ -581,7 +592,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2, bNegate ? 2 : 1);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2, variants);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}
