@@ -24,11 +24,13 @@ typedef struct {
 } point;
 
 // foundVariant says which of the addresses a point yields this result was, and
-// so what has to be done to the private key behind it. Kept in step with the
-// same struct in profanity.cl.
+// so what has to be done to the private key behind it; foundRound which of the
+// launch's point additions it turned up at, every one of which is a different
+// scalar. Kept in step with the same struct in profanity.cl.
 typedef struct {
 	cl_uint found;
 	cl_uint foundId;
+	cl_uint foundRound;
 	cl_uint foundVariant;
 	cl_uchar foundHash[20];
 } result;

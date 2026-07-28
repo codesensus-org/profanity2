@@ -147,6 +147,30 @@ usage: ./profanity2 [OPTIONS]
                             listed in "Reading a result" above and want a
                             transform to reach the private key. At 6 that
                             is five results in six.
+    -R, --rounds <n>        How many point additions a launch does per point,
+                            before handing back. [default = 1]
+
+                            This saves the kernel launch and nothing else. A
+                            point's delta and previous lambda still go out to
+                            global memory and come back on every round, so the
+                            traffic per point is what it was; only the
+                            enqueue, the result read and the dispatch behind
+                            them are paid once for every n rather than once
+                            each. On a card whose launch is already millions
+                            of points long that is a rounding error, and 1 is
+                            the right answer.
+
+                            Worth more only where a launch is short enough for
+                            its overhead to show -- a small -I, a slow device,
+                            a driver with an expensive enqueue. Measure before
+                            raising it.
+
+                            Costs nothing in registers. Bounded instead by how
+                            long a launch may run: too high and a run answers
+                            --min-score and its own cancellation late, and on
+                            some drivers a kernel that runs for seconds is a
+                            kernel that gets killed.
+
     -w, --work <size>       Set OpenCL local work size. [default = 64]
     -W, --work-max <size>   Set OpenCL maximum work size. [default = -i * -I]
     -i, --inverse-size      Set size of modular inverses to calculate in one

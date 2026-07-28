@@ -65,6 +65,14 @@
 #error "PROFANITY_VARIANTS must be between 1 and 6"
 #endif
 
+// How many point additions a launch does per point before handing back. The
+// state a point carries between them — its delta and its previous lambda — stays
+// in the kernel across all of them, so the global memory traffic that state
+// costs, and the launch it costs, are divided by this.
+#if PROFANITY_ROUNDS < 1
+#error "PROFANITY_ROUNDS must be at least 1"
+#endif
+
 #define MP_WORDS 8
 #define MP_BITS 32
 #define bswap32(n) (rotate(n & 0x00FF00FF, 24U)|(rotate(n, 8U) & 0x00FF00FF))
@@ -461,9 +469,14 @@ void point_add(point * const r, point * const p, point * const o) {
 // what has to be done to the private key behind it — see PROFANITY_VARIANTS and
 // profanity_iterate. Zero is the point itself, whose key is the scalar the host
 // prints unchanged; one is its negation, whose key is that scalar's.
+//
+// foundRound says which of the launch's PROFANITY_ROUNDS point additions the
+// address turned up at, every one of which lands on a different scalar. Without
+// it a launch doing more than one would have no way to say which.
 typedef struct {
 	uint found;
 	uint foundId;
+	uint foundRound;
 	uint foundVariant;
 	uchar foundHash[20];
 } result;
@@ -582,127 +595,12 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 #error "PROFANITY_INVERSE_STRIP and PROFANITY_INVERSE_GROUP must both be 0 or both be non-zero"
 #endif
 
-#if PROFANITY_TWO_LEVEL_INVERSE
-
-// A work item multiplies PROFANITY_INVERSE_STRIP points into prefix products it
-// holds in registers. Prefix and suffix scans across the work group's strip
-// products then leave each item the product of every strip but its own, so a
-// single inverse serves all PROFANITY_INVERSE_STRIP * PROFANITY_INVERSE_GROUP
-// points, which is worth arranging: an inverse costs on the order of 190 modular
-// multiplications.
-__attribute__((reqd_work_group_size(PROFANITY_INVERSE_GROUP, 1, 1)))
-__kernel void profanity_inverse(__global const mp_number * const pDeltaX, __global mp_number * const pInverse) {
-	const uint lid = get_local_id(0);
-	// Strided by the group, so the items of a group read adjacent addresses.
-	const size_t id = get_group_id(0) * (size_t)(PROFANITY_INVERSE_GROUP * PROFANITY_INVERSE_STRIP) + lid;
-
-	// negativeDoubleGy = 0x6f8a4b11b2b8773544b60807e3ddeeae05d0976eb2f557ccc7705edf09de52bf
-	mp_number negativeDoubleGy = { {0x09de52bf, 0xc7705edf, 0xb2f557cc, 0x05d0976e, 0xe3ddeeae, 0x44b60807, 0xb2b87735, 0x6f8a4b11 } };
-
-	mp_number copy1, copy2, other;
-	mp_number buffer[PROFANITY_INVERSE_STRIP];
-	__local mp_number prefix[PROFANITY_INVERSE_GROUP], suffix[PROFANITY_INVERSE_GROUP], groupInverse;
-
-	// buffer[i] = pDeltaX[id] * pDeltaX[id + G] * ... * pDeltaX[id + i * G].
-	// Unrolled, or the indices stay dynamic and the array stays out of registers.
-	buffer[0] = pDeltaX[id];
-	#pragma unroll
-	for (uint i = 1; i < PROFANITY_INVERSE_STRIP; ++i) {
-		other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP];
-		mp_mod_mul(&buffer[i], &other, &buffer[i - 1]);
-	}
-
-	prefix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1];
-	suffix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1];
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	for (uint d = 1; d < PROFANITY_INVERSE_GROUP; d <<= 1) {
-		copy1 = prefix[lid];
-		copy2 = suffix[lid];
-		if (lid >= d) { other = prefix[lid - d]; mp_mod_mul(&copy1, &copy1, &other); }
-		if (lid + d < PROFANITY_INVERSE_GROUP) { other = suffix[lid + d]; mp_mod_mul(&copy2, &copy2, &other); }
-		barrier(CLK_LOCAL_MEM_FENCE);
-		prefix[lid] = copy1;
-		suffix[lid] = copy2;
-		barrier(CLK_LOCAL_MEM_FENCE);
-	}
-
-	// Take the inverse of all x-values combined, with -2G_y multiplied in so that
-	//            - 2 * G_y
-	//  ----------------------------
-	//  x_0 * x_1 * x_2 * x_3 * ...
-	if (lid == 0) {
-		copy1 = prefix[PROFANITY_INVERSE_GROUP - 1];
-		mp_mod_inverse(&copy1);
-		mp_mod_mul(&copy1, &copy1, &negativeDoubleGy);
-		groupInverse = copy1;
-	}
-	barrier(CLK_LOCAL_MEM_FENCE);
-
-	copy1 = groupInverse;
-	if (lid > 0) { other = prefix[lid - 1]; mp_mod_mul(&copy1, &copy1, &other); }
-	if (lid + 1 < PROFANITY_INVERSE_GROUP) { other = suffix[lid + 1]; mp_mod_mul(&copy1, &copy1, &other); }
-
-	// Multiply out each individual inverse using the buffer
-	#pragma unroll
-	for (uint i = PROFANITY_INVERSE_STRIP - 1; i > 0; --i) {
-		mp_mod_mul(&copy2, &copy1, &buffer[i - 1]);
-		other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP];
-		pInverse[id + i * PROFANITY_INVERSE_GROUP] = copy2;
-		mp_mod_mul(&copy1, &copy1, &other);
-	}
-
-	pInverse[id] = copy1;
-}
-
-#else /* !PROFANITY_TWO_LEVEL_INVERSE */
-
-// Single-level inverse: one work item handles a whole batch of
-// PROFANITY_INVERSE_SIZE points by itself, with no local memory and no barriers.
-//
-// My RX 480 is very sensitive to changes in the second loop and sometimes I have
-// to make seemingly non-functional changes to the code to make the compiler
-// generate the most optimized version.
-__kernel void profanity_inverse(__global const mp_number * const pDeltaX, __global mp_number * const pInverse) {
-	const size_t id = get_global_id(0) * PROFANITY_INVERSE_SIZE;
-
-	// negativeDoubleGy = 0x6f8a4b11b2b8773544b60807e3ddeeae05d0976eb2f557ccc7705edf09de52bf
-	mp_number negativeDoubleGy = { {0x09de52bf, 0xc7705edf, 0xb2f557cc, 0x05d0976e, 0xe3ddeeae, 0x44b60807, 0xb2b87735, 0x6f8a4b11 } };
-
-	mp_number copy1, copy2;
-	mp_number buffer[PROFANITY_INVERSE_SIZE];
-	mp_number buffer2[PROFANITY_INVERSE_SIZE];
-
-	// We initialize buffer and buffer2 such that:
-	// buffer[i] = pDeltaX[id] * pDeltaX[id + 1] * pDeltaX[id + 2] * ... * pDeltaX[id + i]
-	// buffer2[i] = pDeltaX[id + i]
-	buffer[0] = pDeltaX[id];
-	for (uint i = 1; i < PROFANITY_INVERSE_SIZE; ++i) {
-		buffer2[i] = pDeltaX[id + i];
-		mp_mod_mul(&buffer[i], &buffer2[i], &buffer[i - 1]);
-	}
-
-	// Take the inverse of all x-values combined
-	copy1 = buffer[PROFANITY_INVERSE_SIZE - 1];
-	mp_mod_inverse(&copy1);
-
-	// We multiply in -2G_y together with the inverse so that we have:
-	//            - 2 * G_y
-	//  ----------------------------
-	//  x_0 * x_1 * x_2 * x_3 * ...
-	mp_mod_mul(&copy1, &copy1, &negativeDoubleGy);
-
-	// Multiply out each individual inverse using the buffers
-	for (uint i = PROFANITY_INVERSE_SIZE - 1; i > 0; --i) {
-		mp_mod_mul(&copy2, &copy1, &buffer[i - 1]);
-		mp_mod_mul(&copy1, &copy1, &buffer2[i]);
-		pInverse[id + i] = copy2;
-	}
-
-	pInverse[id] = copy1;
-}
-
-#endif /* PROFANITY_TWO_LEVEL_INVERSE */
+// Both inversion schemes are fused into the scoring kernel at the end of this
+// file rather than run as a kernel of their own. An inverse is consumed by the
+// point addition that immediately follows it, so writing every one of them out
+// to global memory for a second kernel to read straight back in was 64 bytes a
+// point of traffic and a kernel launch, for a value that never needed to leave
+// registers. See PROFANITY_ROUND, which is where the fusing happens.
 
 static inline uchar profanity_byte(const uint * const address, const int i) {
 	return (uchar)(address[i >> 2] >> ((i & 3) << 3));
@@ -838,12 +736,13 @@ static inline void profanity_address(const mp_number * const x, const mp_number 
 // After the above point addition this calculates the public address or
 // addresses corresponding to the point, and writes five words for each into
 // `addresses`. There are PROFANITY_VARIANTS of them.
-static inline void profanity_iterate(__global mp_number * const pDeltaX, __global mp_number * const pInverse, __global mp_number * const pPrevLambda, const size_t id, const uchar bContract, uint * const addresses) {
+// dX and tmp arrive by value: the caller has both in registers already, dX from
+// the pass that built the prefix products and tmp as the inverse it just
+// unwound, and neither has any business going out to global memory and back.
+static inline void profanity_iterate(mp_number dX, mp_number tmp, __global mp_number * const pDeltaX, __global mp_number * const pPrevLambda, const size_t id, const uchar bContract, uint * const addresses) {
 	// negativeGx = 0x8641998106234453aa5f9d6a3178f4f8fd640324d231d726a60d7ea3e907e497
 	mp_number negativeGx = { {0xe907e497, 0xa60d7ea3, 0xd231d726, 0xfd640324, 0x3178f4f8, 0xaa5f9d6a, 0x06234453, 0x86419981 } };
 
-	mp_number dX = pDeltaX[id];
-	mp_number tmp = pInverse[id];
 	mp_number lambda = pPrevLambda[id];
 
 	// λ' = - (2G_y) / d' - λ <=> lambda := pInversedNegativeDoubleGy[id] - pPrevLambda[id]
@@ -939,7 +838,7 @@ static inline uchar profanity_written_nibble(const uint * const written, const i
 	return (uchar)((written[i >> 3] >> ((i & 7) << 2)) & 0xF);
 }
 
-void profanity_result_update(const size_t id, const uint variant, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax, const uchar bAppend) {
+void profanity_result_update(const size_t id, const uint round, const uint variant, const uint * const address, __global result * const pResult, const uchar score, const uchar scoreMax, const uchar bAppend) {
 	if (!score || score <= scoreMax) {
 		return;
 	}
@@ -957,6 +856,7 @@ void profanity_result_update(const size_t id, const uint variant, const uint * c
 		if (at < PROFANITY_MAX_SCORE) {
 			pResult[at + 1].found = score;
 			pResult[at + 1].foundId = id;
+			pResult[at + 1].foundRound = round;
 			pResult[at + 1].foundVariant = variant;
 
 			for (int i = 0; i < 20; ++i) {
@@ -972,6 +872,7 @@ void profanity_result_update(const size_t id, const uint variant, const uint * c
 	// Save only one result for each score, the first.
 	if (hasResult == 0) {
 		pResult[score].foundId = id;
+		pResult[score].foundRound = round;
 		pResult[score].foundVariant = variant;
 
 		for (int i = 0; i < 20; ++i) {
@@ -1293,7 +1194,7 @@ static inline int profanity_score_fn_doubles(const uint * const address, __const
 	{ \
 		const uint * const address = addresses + (V) * 5; \
 		const int score = profanity_score_fn_##NAME(address, data1, data2); \
-		profanity_result_update(id, (V), address, pResult, score, scoreMax, bAppend); \
+		profanity_result_update(id, round, (V), address, pResult, score, scoreMax, bAppend); \
 	}
 
 // Spelled out per count rather than looped, for the same reason as above: the
@@ -1325,13 +1226,181 @@ static inline int profanity_score_fn_doubles(const uint * const address, __const
 	PROFANITY_SCORE_ONE(NAME, 4) PROFANITY_SCORE_ONE(NAME, 5)
 #endif
 
-// One kernel per scoring mode, each taking a candidate from the point addition
-// through to its score. bContract is uniform across the launch and selects the
-// second hash that turns a sender into the contract it deploys at nonce 0.
+// One point, from the inverse the caller unwound for it through to its score.
+// Generated per scoring mode because OpenCL C has no function pointers, so the
+// scoring function has to be named at compile time.
+#define PROFANITY_POINT_FN(NAME) \
+static inline void profanity_point_##NAME( \
+		const mp_number dX, \
+		const mp_number inverse, \
+		__global mp_number * const pDeltaX, \
+		__global mp_number * const pPrevLambda, \
+		__global result * const pResult, \
+		__constant const uchar * const data1, \
+		__constant const uchar * const data2, \
+		const uchar scoreMax, \
+		const uchar bAppend, \
+		const uchar bContract, \
+		const size_t id, \
+		const uint round) { \
+	uint addresses[PROFANITY_VARIANTS * 5]; \
+	profanity_iterate(dX, inverse, pDeltaX, pPrevLambda, id, bContract, addresses); \
+	PROFANITY_SCORE_VARIANTS(NAME) \
+}
+
+// What every point in the round is handed to, spelled once so the two inversion
+// schemes below can each stay about their own business.
+#define PROFANITY_POINT(NAME, IDX, DX, INV) \
+	profanity_point_##NAME((DX), (INV), pDeltaX, pPrevLambda, pResult, data1, data2, \
+		scoreMax, bAppend, bContract, (IDX), round)
+
+#if PROFANITY_TWO_LEVEL_INVERSE
+
+// A work item multiplies PROFANITY_INVERSE_STRIP points into prefix products it
+// holds in registers. Prefix and suffix scans across the work group's strip
+// products then leave each item the product of every strip but its own, so a
+// single inverse serves all PROFANITY_INVERSE_STRIP * PROFANITY_INVERSE_GROUP
+// points, which is worth arranging: an inverse costs on the order of 190 modular
+// multiplications.
+//
+// Each inverse is handed straight to the point addition that wanted it, so
+// nothing here writes an inverse out and nothing reads one back.
+#define PROFANITY_KERNEL_ATTRIBUTES __attribute__((reqd_work_group_size(PROFANITY_INVERSE_GROUP, 1, 1)))
+#define PROFANITY_POINTS_PER_ITEM (PROFANITY_INVERSE_STRIP)
+
+#define PROFANITY_ROUND(NAME) \
+	{ \
+		mp_number copy1, copy2, other; \
+		mp_number buffer[PROFANITY_INVERSE_STRIP]; \
+		\
+		/* buffer[i] = pDeltaX[id] * pDeltaX[id + G] * ... * pDeltaX[id + i * G]. */ \
+		/* Unrolled, or the indices stay dynamic and the array leaves registers. */ \
+		buffer[0] = pDeltaX[id]; \
+		_Pragma("unroll") \
+		for (uint i = 1; i < PROFANITY_INVERSE_STRIP; ++i) { \
+			other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP]; \
+			mp_mod_mul(&buffer[i], &other, &buffer[i - 1]); \
+		} \
+		\
+		/* The round before this one read prefix and suffix after its own last */ \
+		/* barrier, so nothing may overwrite them until every item is past that. */ \
+		barrier(CLK_LOCAL_MEM_FENCE); \
+		prefix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1]; \
+		suffix[lid] = buffer[PROFANITY_INVERSE_STRIP - 1]; \
+		barrier(CLK_LOCAL_MEM_FENCE); \
+		\
+		for (uint d = 1; d < PROFANITY_INVERSE_GROUP; d <<= 1) { \
+			copy1 = prefix[lid]; \
+			copy2 = suffix[lid]; \
+			if (lid >= d) { other = prefix[lid - d]; mp_mod_mul(&copy1, &copy1, &other); } \
+			if (lid + d < PROFANITY_INVERSE_GROUP) { other = suffix[lid + d]; mp_mod_mul(&copy2, &copy2, &other); } \
+			barrier(CLK_LOCAL_MEM_FENCE); \
+			prefix[lid] = copy1; \
+			suffix[lid] = copy2; \
+			barrier(CLK_LOCAL_MEM_FENCE); \
+		} \
+		\
+		/* Take the inverse of all x-values combined, with -2G_y multiplied in. */ \
+		if (lid == 0) { \
+			copy1 = prefix[PROFANITY_INVERSE_GROUP - 1]; \
+			mp_mod_inverse(&copy1); \
+			mp_mod_mul(&copy1, &copy1, &negativeDoubleGy); \
+			groupInverse = copy1; \
+		} \
+		barrier(CLK_LOCAL_MEM_FENCE); \
+		\
+		copy1 = groupInverse; \
+		if (lid > 0) { other = prefix[lid - 1]; mp_mod_mul(&copy1, &copy1, &other); } \
+		if (lid + 1 < PROFANITY_INVERSE_GROUP) { other = suffix[lid + 1]; mp_mod_mul(&copy1, &copy1, &other); } \
+		\
+		/* Multiply out each individual inverse and spend it where it is. The */ \
+		/* delta is read before the point addition overwrites it, since the */ \
+		/* unwind below needs the value that went into the product. */ \
+		\
+		/* Deliberately not unrolled, unlike the prefix loop above. What this */ \
+		/* body holds is a whole point -- the addition, PROFANITY_VARIANTS */ \
+		/* keccak permutations and the scoring of each -- so unrolling it */ \
+		/* inlines all of that PROFANITY_INVERSE_STRIP times over. At a strip */ \
+		/* of eight that is enough code that NVIDIA's compiler stops coming */ \
+		/* back: the build hangs rather than fails, at any variant count. The */ \
+		/* prefix loop above is a single modular multiplication and unrolls */ \
+		/* harmlessly, which is the difference. */ \
+		for (uint i = PROFANITY_INVERSE_STRIP - 1; i > 0; --i) { \
+			mp_mod_mul(&copy2, &copy1, &buffer[i - 1]); \
+			other = pDeltaX[id + i * PROFANITY_INVERSE_GROUP]; \
+			PROFANITY_POINT(NAME, id + i * PROFANITY_INVERSE_GROUP, other, copy2); \
+			mp_mod_mul(&copy1, &copy1, &other); \
+		} \
+		\
+		PROFANITY_POINT(NAME, id, buffer[0], copy1); \
+	}
+
+#define PROFANITY_ROUND_LOCALS \
+	const uint lid = get_local_id(0); \
+	/* Strided by the group, so the items of a group read adjacent addresses. */ \
+	const size_t id = get_group_id(0) * (size_t)(PROFANITY_INVERSE_GROUP * PROFANITY_INVERSE_STRIP) + lid; \
+	__local mp_number prefix[PROFANITY_INVERSE_GROUP], suffix[PROFANITY_INVERSE_GROUP], groupInverse;
+
+#else /* !PROFANITY_TWO_LEVEL_INVERSE */
+
+// Single-level inverse: one work item handles a whole batch of
+// PROFANITY_INVERSE_SIZE points by itself, with no local memory and no barriers.
+//
+// My RX 480 is very sensitive to changes in the second loop and sometimes I have
+// to make seemingly non-functional changes to the code to make the compiler
+// generate the most optimized version.
+#define PROFANITY_KERNEL_ATTRIBUTES
+#define PROFANITY_POINTS_PER_ITEM (PROFANITY_INVERSE_SIZE)
+
+#define PROFANITY_ROUND(NAME) \
+	{ \
+		mp_number copy1, copy2; \
+		mp_number buffer[PROFANITY_INVERSE_SIZE]; \
+		mp_number buffer2[PROFANITY_INVERSE_SIZE]; \
+		\
+		/* buffer[i] = pDeltaX[id] * ... * pDeltaX[id + i], buffer2[i] = pDeltaX[id + i] */ \
+		buffer[0] = pDeltaX[id]; \
+		for (uint i = 1; i < PROFANITY_INVERSE_SIZE; ++i) { \
+			buffer2[i] = pDeltaX[id + i]; \
+			mp_mod_mul(&buffer[i], &buffer2[i], &buffer[i - 1]); \
+		} \
+		\
+		/* Take the inverse of all x-values combined, with -2G_y multiplied in. */ \
+		copy1 = buffer[PROFANITY_INVERSE_SIZE - 1]; \
+		mp_mod_inverse(&copy1); \
+		mp_mod_mul(&copy1, &copy1, &negativeDoubleGy); \
+		\
+		/* Multiply out each individual inverse and spend it where it is. The */ \
+		/* deltas are already in buffer2, which the point addition cannot touch. */ \
+		for (uint i = PROFANITY_INVERSE_SIZE - 1; i > 0; --i) { \
+			mp_mod_mul(&copy2, &copy1, &buffer[i - 1]); \
+			mp_mod_mul(&copy1, &copy1, &buffer2[i]); \
+			PROFANITY_POINT(NAME, id + i, buffer2[i], copy2); \
+		} \
+		\
+		PROFANITY_POINT(NAME, id, buffer[0], copy1); \
+	}
+
+#define PROFANITY_ROUND_LOCALS \
+	const size_t id = get_global_id(0) * PROFANITY_INVERSE_SIZE;
+
+#endif /* PROFANITY_TWO_LEVEL_INVERSE */
+
+// One kernel per scoring mode, each taking a batch of points from their shared
+// inverse through to their scores, PROFANITY_ROUNDS times over. bContract is
+// uniform across the launch and selects the second hash that turns a sender into
+// the contract it deploys at nonce 0.
+//
+// Rounds are what a launch is worth rather than what a kernel is: the state a
+// point carries between them is two mp_numbers, and at one round a launch it
+// went out to global memory and came back for every one of them. Held in the
+// kernel across PROFANITY_ROUNDS of them instead, that traffic and the launch
+// behind it are paid once for however many rounds are asked for.
 #define PROFANITY_SCORE_KERNEL(NAME) \
+PROFANITY_POINT_FN(NAME) \
+PROFANITY_KERNEL_ATTRIBUTES \
 __kernel void profanity_iterate_score_##NAME( \
 		__global mp_number * const pDeltaX, \
-		__global const mp_number * const pInverse, \
 		__global mp_number * const pPrevLambda, \
 		__global result * const pResult, \
 		__constant const uchar * const data1, \
@@ -1339,10 +1408,12 @@ __kernel void profanity_iterate_score_##NAME( \
 		const uchar scoreMax, \
 		const uchar bAppend, \
 		const uchar bContract) { \
-	const size_t id = get_global_id(0); \
-	uint addresses[PROFANITY_VARIANTS * 5]; \
-	profanity_iterate(pDeltaX, pInverse, pPrevLambda, id, bContract, addresses); \
-	PROFANITY_SCORE_VARIANTS(NAME) \
+	/* negativeDoubleGy = 0x6f8a4b11b2b8773544b60807e3ddeeae05d0976eb2f557ccc7705edf09de52bf */ \
+	mp_number negativeDoubleGy = { {0x09de52bf, 0xc7705edf, 0xb2f557cc, 0x05d0976e, 0xe3ddeeae, 0x44b60807, 0xb2b87735, 0x6f8a4b11 } }; \
+	PROFANITY_ROUND_LOCALS \
+	for (uint round = 0; round < PROFANITY_ROUNDS; ++round) { \
+		PROFANITY_ROUND(NAME) \
+	} \
 }
 
 PROFANITY_SCORE_KERNEL(benchmark)
@@ -1382,7 +1453,7 @@ __kernel void profanity_create2_init(__global result * const pResult) {
 	pResult[get_global_id(0)].found = 0;
 }
 
-inline void profanity_create2(__constant const uint * const pTemplate, const ulong counter, uint * const address) {
+static inline void profanity_create2(__constant const uint * const pTemplate, const ulong counter, uint * const address) {
 	ethhash h = { { 0 } };
 
 	for (int i = 0; i < PROFANITY_CREATE2_WORDS; ++i) {
@@ -1419,7 +1490,7 @@ __kernel void profanity_create2_score_##NAME( \
 	uint address[5]; \
 	profanity_create2(pTemplate, counterBase + id, address); \
 	const int score = profanity_score_fn_##NAME(address, data1, data2); \
-	profanity_result_update(id, 0, address, pResult, score, scoreMax, bAppend); \
+	profanity_result_update(id, 0, 0, address, pResult, score, scoreMax, bAppend); \
 }
 
 PROFANITY_CREATE2_KERNEL(benchmark)

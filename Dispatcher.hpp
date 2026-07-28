@@ -52,13 +52,11 @@ class Dispatcher {
 
 			cl_kernel m_kernelInit;
 			cl_kernel m_kernelInitUniform;
-			cl_kernel m_kernelInverse;
 			cl_kernel m_kernelIterate;
 			cl_kernel m_kernelCreate2Init;
 
 			CLMemory<point> m_memPrecomp;
 			CLMemory<mp_number> m_memPointsDeltaX;
-			CLMemory<mp_number> m_memInversedNegativeDoubleGy;
 			CLMemory<mp_number> m_memPrevLambda;
 			CLMemory<result> m_memResult;
 
@@ -104,7 +102,7 @@ class Dispatcher {
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants, const size_t rounds);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
@@ -119,7 +117,7 @@ class Dispatcher {
 		void dispatch(Device & d);
 		void enqueueKernel(cl_command_queue & clQueue, cl_kernel & clKernel, size_t worksizeGlobal, const size_t worksizeLocal, cl_event * pEvent);
 		void enqueueKernelDevice(Device & d, cl_kernel & clKernel, size_t worksizeGlobal, cl_event * pEvent);
-		void enqueueInverse(Device & d, cl_event * pEvent);
+		void enqueueIterate(Device & d, cl_event * pEvent);
 
 		void handleResult(Device & d);
 		void handleFloorResult(Device & d);
@@ -151,6 +149,12 @@ class Dispatcher {
 		// gets through and the points are an implementation detail of reaching
 		// them. One for a CREATE2 search, which hashes salts and not points.
 		const size_t m_variants;
+
+		// How many point additions a launch does per point. The state a point
+		// carries between them stays in the kernel, so this divides both the
+		// global memory traffic that state costs and the launches a search
+		// makes. One for a CREATE2 search, which has no point to advance.
+		const size_t m_rounds;
 
 		cl_uchar m_clScoreMax;
 		const cl_uchar m_clScoreMin;

@@ -88,7 +88,12 @@ static std::string toHex(const uint8_t * const s, const size_t len) {
 }
 
 // The private key a result was found at: the seed this device started from,
-// advanced by the rounds behind it and by the work item that found it.
+// advanced by the point additions behind it and by the work item that found it.
+//
+// `round` counts point additions and not launches, so a launch doing several
+// advances it by several, and r.foundRound says which of them this result turned
+// up at. Every one of them lands on a different scalar, so reading the last of a
+// launch for all of them would hand back a key to an address nobody has.
 static std::string privateKeyFor(cl_ulong4 seed, cl_ulong round, const result & r) {
 	cl_ulong carry = 0;
 	cl_ulong4 seedRes;
@@ -218,7 +223,6 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_clQueue(createQueue(clContext, clDeviceId) ),
 	m_kernelInit( createKernel(clProgram, "profanity_init") ),
 	m_kernelInitUniform( createKernel(clProgram, "profanity_init_uniform") ),
-	m_kernelInverse(createKernel(clProgram, "profanity_inverse")),
 	m_kernelIterate(createKernel(clProgram, mode.kernelName())),
 	m_kernelCreate2Init(createKernel(clProgram, "profanity_create2_init")),
 	m_memPrecomp(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, sizeof(g_precomp), g_precomp),
@@ -227,7 +231,6 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	// A CREATE2 search has no points at all, so it asks for a buffer that
 	// merely exists rather than one it will never read.
 	m_memPointsDeltaX(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
-	m_memInversedNegativeDoubleGy(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
 	m_memPrevLambda(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, mode.target == CREATE2 ? 1 : size, true),
 	// Appending resets the counter heading the result buffer from the host
 	// before every round, which CL_MEM_HOST_READ_ONLY would forbid.
@@ -270,7 +273,7 @@ Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const size_t inverseStrip, const size_t inverseGroup, const cl_uchar clScoreMin, const cl_uchar clScoreQuit, const std::string & seedPublicKey, const create2 & clCreate2, const size_t variants, const size_t rounds)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
@@ -280,6 +283,7 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_inverseGroup(inverseGroup)
 	, m_size(inverseSize*inverseMultiple)
 	, m_variants(mode.target == CREATE2 ? 1 : variants)
+	, m_rounds(mode.target == CREATE2 ? 1 : rounds)
 	, m_clScoreMax(clScoreMin > 0 ? clScoreMin : mode.score)
 	, m_clScoreMin(clScoreMin)
 	, m_clScoreQuit(clScoreQuit)
@@ -412,21 +416,17 @@ void Dispatcher::initBegin(Device & d) {
 	OpenCLException::throwIfError("failed to enqueue the shared starting point",
 		clEnqueueNDRangeKernel(d.m_clQueue, d.m_kernelInitUniform, 1, NULL, &one, NULL, 0, NULL, NULL));
 
-	// Kernel arguments - profanity_inverse
-	d.m_memPointsDeltaX.setKernelArg(d.m_kernelInverse, 0);
-	d.m_memInversedNegativeDoubleGy.setKernelArg(d.m_kernelInverse, 1);
-
-	// Kernel arguments - profanity_iterate_score_*
+	// Kernel arguments - profanity_iterate_score_*, which takes the inversion in
+	// as well and so wants no buffer to pass one through.
 	d.m_memPointsDeltaX.setKernelArg(d.m_kernelIterate, 0);
-	d.m_memInversedNegativeDoubleGy.setKernelArg(d.m_kernelIterate, 1);
-	d.m_memPrevLambda.setKernelArg(d.m_kernelIterate, 2);
-	d.m_memResult.setKernelArg(d.m_kernelIterate, 3);
-	d.m_memData1.setKernelArg(d.m_kernelIterate, 4);
-	d.m_memData2.setKernelArg(d.m_kernelIterate, 5);
+	d.m_memPrevLambda.setKernelArg(d.m_kernelIterate, 1);
+	d.m_memResult.setKernelArg(d.m_kernelIterate, 2);
+	d.m_memData1.setKernelArg(d.m_kernelIterate, 3);
+	d.m_memData2.setKernelArg(d.m_kernelIterate, 4);
 
-	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 6, d.m_clScoreMax); // Updated in handleResult(), pinned under a floor
-	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 7, (cl_uchar) (m_bAppend ? 1 : 0));
-	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 8, (cl_uchar) (m_mode.target == CONTRACT ? 1 : 0));
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 5, d.m_clScoreMax); // Updated in handleResult(), pinned under a floor
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 6, (cl_uchar) (m_bAppend ? 1 : 0));
+	CLMemory<cl_uchar>::setKernelArg(d.m_kernelIterate, 7, (cl_uchar) (m_mode.target == CONTRACT ? 1 : 0));
 
 	// Seed device
 	initContinue(d);
@@ -515,11 +515,14 @@ void Dispatcher::enqueueKernel(cl_command_queue & clQueue, cl_kernel & clKernel,
 	}
 }
 
-void Dispatcher::enqueueInverse(Device & d, cl_event * pEvent = NULL) {
+// The scoring kernel is launched over the batches an inversion covers rather
+// than over points: a work item owns a whole batch now, taking it from the one
+// inverse they share through to their scores.
+void Dispatcher::enqueueIterate(Device & d, cl_event * pEvent = NULL) {
 	if (m_inverseStrip == 0) {
-		enqueueKernelDevice(d, d.m_kernelInverse, m_size / m_inverseSize, pEvent);
+		enqueueKernelDevice(d, d.m_kernelIterate, m_size / m_inverseSize, pEvent);
 	} else {
-		enqueueKernel(d.m_clQueue, d.m_kernelInverse, m_size / m_inverseStrip, m_inverseGroup, pEvent);
+		enqueueKernel(d.m_clQueue, d.m_kernelIterate, m_size / m_inverseStrip, m_inverseGroup, pEvent);
 	}
 }
 
@@ -562,18 +565,19 @@ void Dispatcher::dispatch(Device & d) {
 	}
 
 #ifdef PROFANITY_DEBUG
-	cl_event eventInverse;
 	cl_event eventIterate;
 
-	if (m_mode.target != CREATE2) {
-		enqueueInverse(d, &eventInverse);
+	if (m_mode.target == CREATE2) {
+		enqueueKernelDevice(d, d.m_kernelIterate, m_size, &eventIterate);
+	} else {
+		enqueueIterate(d, &eventIterate);
 	}
-	enqueueKernelDevice(d, d.m_kernelIterate, m_size, &eventIterate);
 #else
-	if (m_mode.target != CREATE2) {
-		enqueueInverse(d);
+	if (m_mode.target == CREATE2) {
+		enqueueKernelDevice(d, d.m_kernelIterate, m_size);
+	} else {
+		enqueueIterate(d);
 	}
-	enqueueKernelDevice(d, d.m_kernelIterate, m_size);
 #endif
 
 	clFlush(d.m_clQueue);
@@ -586,7 +590,7 @@ void Dispatcher::dispatch(Device & d) {
 	if (m_mode.target == CREATE2) {
 		std::cout << "Timing: profanity_create2 = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
 	} else {
-		std::cout << "Timing: profanity_inverse = " << getKernelExecutionTimeMicros(eventInverse) << "us, profanity_iterate = " << getKernelExecutionTimeMicros(eventIterate) << "us" << std::endl;
+		std::cout << "Timing: profanity_iterate = " << getKernelExecutionTimeMicros(eventIterate) << "us for " << m_rounds << " round(s)" << std::endl;
 	}
 #endif
 
@@ -683,7 +687,17 @@ void Dispatcher::report(Device & d, const result & r, const cl_uchar score) {
 		return;
 	}
 
-	printResult(g_variantNames[r.foundVariant], privateKeyFor(d.m_clSeed, d.m_round, r), r, score, timeStart, m_mode);
+	// m_round counts point additions enqueued, and dispatch() reads a round's
+	// results back on the dispatch after the one that enqueued it — so by the
+	// time they are in hand, m_round has been advanced for the launch that
+	// found them and for the one behind it as well. Step back over both, then
+	// forward to the round within the launch that this result turned up at.
+	//
+	// At one round a launch the two steps cancel and this is m_round, which is
+	// what it was before a launch was worth more than one round.
+	const cl_ulong round = d.m_round - 2 * (m_rounds - 1) + r.foundRound;
+
+	printResult(g_variantNames[r.foundVariant], privateKeyFor(d.m_clSeed, round, r), r, score, timeStart, m_mode);
 }
 
 void Dispatcher::handleResult(Device & d) {
@@ -725,13 +739,15 @@ void Dispatcher::onEvent(cl_event event, cl_int status, Device & d) {
 	else if (d.m_eventFinished != NULL) {
 		initContinue(d);
 	} else {
-		++d.m_round;
+		// Point additions and not launches: a launch is worth m_rounds of them,
+		// and it is the point additions that the scalars are counted in.
+		d.m_round += m_rounds;
 		handleResult(d);
 
 		bool bDispatch = true;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			d.m_speed.sample(m_size * m_variants);
+			d.m_speed.sample(m_size * m_variants * m_rounds);
 			printSpeed();
 
 			if( m_quit ) {

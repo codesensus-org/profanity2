@@ -280,6 +280,7 @@ int main(int argc, char * * argv) {
 		size_t inverseGroup = 0;
 		bool bMineContract = false;
 		size_t variants = 1;
+		size_t rounds = 1;
 		std::string strFactory;
 		std::string strCaller;
 		std::string strInitCodeHash;
@@ -315,6 +316,7 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
 		argp.addSwitch('r', "min-score", scoreMin);
 		argp.addSwitch('V', "variants", variants);
+		argp.addSwitch('R', "rounds", rounds);
 
 		if (!argp.parse()) {
 			std::cout << "error: bad arguments, try again :<" << std::endl;
@@ -335,6 +337,20 @@ int main(int argc, char * * argv) {
 		// addresses one point addition can be worth. Refused rather than clamped:
 		// a run asked for more than there is would otherwise report a speed for
 		// work it never did.
+		if (rounds < 1) {
+			std::cout << "error: --rounds must be at least 1, got " << rounds << std::endl;
+			return 1;
+		}
+
+		// Every round a launch does is another chance for the round's results to
+		// outnumber the buffer they are appended to, and a floor loose enough to
+		// overrun it once will overrun it that many times harder.
+		if (rounds > 1 && scoreMin > 0) {
+			std::cout << "note: --rounds " << rounds << " with a score floor collects "
+				<< rounds << " rounds of results into one buffer of " << PROFANITY_MAX_SCORE
+				<< "; raise --min-score if the run warns that it is dropping them" << std::endl;
+		}
+
 		if (variants < 1 || variants > 6) {
 			std::cout << "error: --variants must be between 1 and 6, got " << variants << std::endl;
 			std::cout << "  secp256k1 has six automorphisms and each is worth one address per point;" << std::endl;
@@ -471,7 +487,8 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_MODE_DATA=" + toString(PROFANITY_MODE_DATA)
 			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
 			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER)
-			+ " -D PROFANITY_VARIANTS=" + toString(variants);
+			+ " -D PROFANITY_VARIANTS=" + toString(variants)
+			+ " -D PROFANITY_ROUNDS=" + toString(rounds);
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
@@ -592,7 +609,7 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2, variants);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, inverseStrip, inverseGroup, (cl_uchar) scoreMin, 0, strPublicKey, clCreate2, variants, rounds);
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}
