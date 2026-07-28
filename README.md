@@ -58,7 +58,10 @@ is worth up to six that cost no point arithmetic to reach:
 | 6 | `-psi^2(P)` | — |
 
 so each extra address costs a keccak where another point would cost a point
-addition. Measured on a CPU device at +62% for 2 and +145% for 6.
+addition. Going from 1 to 6 measured **+96%** on an RTX 4090 and +145% on a CPU
+device -- the gap between those two is the point of the warning below. A keccak
+costs relatively more where 64-bit lanes are emulated, which is every GPU, so the
+extra addresses are worth less there than a CPU measurement suggests.
 
 **Six is the ceiling**, and a property of the curve rather than of this program.
 Those six maps are the *automorphisms* of the curve — the maps `E -> E` that need
@@ -130,11 +133,10 @@ private key (padded):  0bc7506af1b2484069d6ed3ea093c5123d83e2444d9c0a1cf277bf136
 # Tuning a machine
 
 What the performance flags should be varies by card by more than any default can
-cover: two-level inversion is +38% on an RTX 4090 and -62% on a GTX 1070. So
-measure rather than guess.
+cover, so measure rather than guess:
 
 ```bash
-./autotune.py                 # ~20-40 minutes, prints the flags to use
+./autotune.py                 # ~20 minutes, prints the flags to use
 ./autotune.py --cpu --quick   # a few minutes, to see what it does
 ```
 
@@ -146,21 +148,120 @@ search happened to stop:
 ```
   flag                      value    addresses/s    vs best
   --------------------------------------------------------------------
-  variants                      5    25.953 MH/s      -8.9%
-  variants                      6    28.479 MH/s        best <-- chosen
+  variants                      5     3.162 GH/s      -4.7%
+  variants                      6     3.319 GH/s        best <-- chosen
 
-  strip_group              (0, 0)    23.931 MH/s     -16.0%
-  strip_group             (8, 64)    28.479 MH/s        best <-- chosen
-  strip_group            (8, 128)      ruled out
+  inverse_strip                 8     3.155 GH/s      -4.9%
+  inverse_strip                16     3.319 GH/s        best <-- chosen
+  inverse_strip                32       ruled out
 ```
 
-A neighbour that measures *better* is called out rather than folded in: that
-means the search did not converge, and the difference is probably inside the
-noise. `--duration` buys tighter measurements, `--threshold` sets how small a
-gain is worth chasing, and `--json` writes down every measurement it took.
+A neighbour that measures better by more than `--threshold` is called out rather
+than folded in: that means the search did not converge. One ahead by less is
+reported as level, since a difference the search was told not to chase is not one
+it should then complain about. `--duration` buys tighter measurements and
+`--json` writes down every measurement it took.
 
-The speeds are in addresses per second, so counts of `--variants` compare
-directly against each other.
+Speeds are in addresses per second, so counts of `--variants` compare directly
+against each other -- six addresses off one point addition really is six tried.
+
+## Measured on an RTX 4090
+
+Everything below was measured on rented RTX 4090 machines (Ada, driver 580),
+so it is what one architecture wants and not a universal answer. Reproduce it on
+yours with `./autotune.py` before believing any of it.
+
+```
+-i 255 -I 16384 -S 32 -G 512 -V 6        3.839 GH/s
+```
+
+### What the work since `main` is worth
+
+Each row is the row above plus one change, so a step belongs to one thing:
+
+| | addresses/s | this step | vs `main` |
+| --- | --- | --- | --- |
+| `main` | 1.361 GH/s | | baseline |
+| + fused kernels, truncated keccak, seeding | 1.312 GH/s | -3.6% | -3.6% |
+| + two-level inversion | 1.664 GH/s | +26.8% | +22.2% |
+| + six addresses per point | 3.259 GH/s | +95.9% | **+139.5%** |
+
+**2.39x overall.** Almost all of it is the endomorphism work; two-level inversion
+is second. The structural row is a *loss* at one address per point: fusing put
+the single-level inverse's 16 KB of private arrays into the same kernel as the
+inlined keccak, and the occupancy that costs outweighs the traffic and the launch
+it saves. It pays for itself only because it is what lets the rest sit where it
+does.
+
+### The two inversion axes
+
+`-S` and `-G` are not interchangeable, and neither is well behaved. A grid at
+`-i 255 -I 16384 -V 6`, against 2.723 GH/s with two-level off:
+
+| S \ G | 64 | 128 | 256 | 512 |
+| --- | --- | --- | --- | --- |
+| 4 | 3.082 | 3.147 | 2.874 | 3.459 |
+| 8 | 3.495 | 3.528 | 3.296 | 3.661 |
+| 16 | 3.680 | 3.712 | 3.585 | 3.721 |
+| **32** | 3.749 | 3.758 | 3.522 | **3.839** |
+| 64 | 3.641 | 3.621 | 3.608 | n/a |
+
+Two things to take from it.
+
+**The group is not monotonic.** It dips at 256 and recovers at 512, at every
+strip but the largest. A hill climb from 128 steps to 256, loses, and stops --
+never seeing that 512 is the best of them by ~10%. `--threshold` will not save
+you: the intermediate value really is worse. This is why `autotune.py` keeps the
+group on a ladder short enough to walk in full.
+
+**Batch size is not the whole story.** `(16, 128)` and `(8, 256)` both share one
+inverse across 2048 points and measure 12.6% apart. A larger strip costs registers;
+a larger group costs a scan iteration, its barriers, and local memory. The strip
+is the cheaper way to buy the same amortization -- up to a point: it peaks at 32
+and turns down at 64.
+
+### Compile time, which is nearly all of start-up
+
+Seeding is under a second even for the 33.4M points of `-i 255 -I 131072`.
+Everything else in start-up is the OpenCL compile, and that tracks `-S` alone --
+`-S 16` takes the same 50s at `-G 128` and at `-G 512`:
+
+| `-S` | cold compile | throughput |
+| --- | --- | --- |
+| 0 (off) | 34s | 2.723 GH/s |
+| 4 | 38s | 3.459 |
+| 8 | 42s | 3.661 |
+| 16 | 50s | 3.721 |
+| 24 | 60s | - |
+| 32 | 73s | 3.839 |
+| 64 | 131s | 3.621 |
+
+**Cold** is the word doing the work there. NVIDIA caches compiled kernels in
+`~/.nv/ComputeCache` under the driver, which `-n` does not touch -- it only stops
+profanity2 loading its own cache. A second run of the same flags starts in 2s
+however large the strip. Measure this with the cache cleared or you will measure
+nothing.
+
+So `-S 32` searches 3.2% faster and starts 23s later than `-S 16`. They draw
+level after about thirteen minutes of searching:
+
+    T = (73 x 3.839 - 50 x 3.721) / (3.839 - 3.721) = 798s
+
+Under that, 16 wins, and by a lot on anything short -- 31% at two minutes, and
+everything at one, since 32 has not finished compiling. Over it, 32 wins by at
+most 3.1% however long the run goes on. For a worker whose searches usually end
+in seconds, 16 is the better bet.
+
+### What did not matter
+
+`--rounds` is within the noise here: 1, 2, 5, 10 and 20 span 3.319 to 3.350
+GH/s, a 0.9% spread against 1.8% run-to-run variance on a single configuration.
+It amortizes the kernel launch and nothing else -- a point's delta and previous
+lambda still go to global memory and back every round -- and a launch of sixteen
+million points has little launch overhead to amortize.
+
+That 1.8% is worth remembering generally: it is larger than several of the
+differences above, and larger than `autotune.py`'s 1% default threshold.
 
 ### On NVIDIA: the multiprecision arithmetic in inline PTX
 
@@ -720,18 +821,56 @@ wildcards, character counts and ranges, mirroring, and zero bytes.
 ./profanity2.x64 --leading 0 -s 1 -z $PUBLIC_KEY
 ```
 
-### Benchmarks - Current version
-|Model|Clock Speed|Memory Speed|Speed|Time to match eight characters
-|:-:|:-:|:-:|:-:|:-:|
-|GTX 1070|1750|4000|225 MH/s| ~19s
-|RTX 4090|2550|10500|1361 MH/s| ~3s
-|RX 480|1328|4000|120 MH/s| ~36s
-|RX 7900 XTX|2500|10000|592 MH/s| ~7s
-|Apple Silicon M1<br/>(8-core GPU)|1278|4266|60 MH/s| ~72s
-|Apple Silicon M1 Max<br/>(32-core GPU)|1296|6400|229 MH/s| ~19s
-|Apple Silicon M2<br/>(10-core GPU)|1398|6400|75 MH/s| ~57s
-|Apple Silicon M3 Pro<br/>(18-core GPU)|1398|6400|129 MH/s| ~33s
-|Apple Silicon M4 Max<br/>(40-core GPU)|1800|8533|467 MH/s| ~9s
+### Benchmarks - RTX 4090
+
+Stock clocks, default flags, `--variants 1`, `--leading 0`, nothing else
+running on the card:
+
+| search | addresses/s | keccaks per address |
+| --- | --- | --- |
+| account address | **1.56 GH/s** | 1 |
+| `--contract` | **1.05 - 1.15 GH/s** | 2 |
+| `--create2` | **4.3 GH/s** | 1, and no point arithmetic |
+
+CREATE2 is the fastest by a wide margin because it is only a hash: no point
+addition, no modular inversion, nothing to seed. The account search carries all
+of that, and `--contract` hashes twice per address. That ordering — CREATE2
+fastest, `--contract` slowest — is the sanity check to apply to any number this
+program prints about itself.
+
+`tests/bench_create2_state.x64` times the CREATE2 hash on its own at 4.30 GH/s,
+which is within a percent of the search that wraps it, so almost nothing is lost
+to scoring or to the result buffer.
+
+What the optimizations in this fork are worth on the same card:
+
+| change | in a search | in isolation |
+| --- | --- | --- |
+| inline PTX multiprecision (NVIDIA only) | +12.4% | +44% on `mp_mod_mul` |
+| CREATE2 hash state written as whole lanes | — | +8% on the hash |
+| contract address state written as whole lanes | +3.2% | +5.1% |
+
+Measured against a noise floor of 0.5%, established by timing two binaries that
+differ only in code the run never reaches.
+
+### Reading the speed this program prints
+
+Two things about that line will bite anyone scripting against it, and both cost
+this fork a day of wrong conclusions:
+
+- **The unit changes.** `Dispatcher::formatSpeed` scales through K/M/G/T, so a
+  card doing more than 1000 MH/s prints `GH/s`. A `grep` for `MH/s` does not
+  fail loudly; it quietly returns whichever samples happened to dip below the
+  boundary, which on a fast card is a biased half of the truth or nothing at
+  all. Match `[KMGT]H/s` and normalise.
+- **It is a moving average over the last 20 launches**, and it starts at zero.
+  Read too early and the number is still climbing — 575, 861, 957 MH/s over one
+  run that settles at 1178. Give it ~30 seconds and check that consecutive
+  samples agree before believing one.
+
+And when comparing two builds, confirm nothing else is on the card. A second
+process competing for it halved every figure here and left them still looking
+plausible and internally consistent.
 
 # License
 
