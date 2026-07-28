@@ -162,6 +162,35 @@ gain is worth chasing, and `--json` writes down every measurement it took.
 The speeds are in addresses per second, so counts of `--variants` compare
 directly against each other.
 
+### On NVIDIA: the multiprecision arithmetic in inline PTX
+
+Every carry in the multiprecision code is detected by comparison, because OpenCL
+C has no way to name the flag the hardware sets for free. NVIDIA's OpenCL
+frontend shares NVVM with CUDA and accepts inline PTX, which does, so on that
+vendor `profanity.cl` compiles a second implementation of its two innermost
+routines and uses that instead. Nothing needs to be passed to turn it on; the
+kernel detects the compiler.
+
+It is not something NVIDIA documents, so there is a way out if a driver ever
+disagrees:
+
+```bash
+# Take the portable path on every device
+make clean && make CDEFINES=-DPROFANITY_NO_PTX
+```
+
+Both paths are checked against each other and against a host-side big-integer
+reference on every input the tests can think of:
+
+```bash
+cd tests && make && cd ..
+./tests/test_correctness_ptx.x64      # bit-exact equivalence, both directions
+./tests/bench_mod_mul_ptx.x64         # what it is worth, mod-mul in isolation
+```
+
+On anything that is not NVIDIA the two report that there was nothing to compare
+and pass, so run them on the card you intend to mine with.
+
 # Building
 
 ### macOS

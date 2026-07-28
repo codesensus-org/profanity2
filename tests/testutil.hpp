@@ -149,6 +149,22 @@ inline ClSetup clSetup() {
 	return s;
 }
 
+// Whether this device compiled the inline-PTX multiprecision routines, which
+// only NVIDIA's OpenCL frontend does — see PROFANITY_PTX_MP in profanity.cl.
+// Asked of the built program rather than of the device's vendor string, since
+// what matters to a test is whether the kernels are there to call. A device
+// that has them has also compiled the PTX successfully, a program that failed
+// to build having exited above.
+inline bool hasPtxKernels(const ClSetup & s) {
+	cl_int err = CL_SUCCESS;
+	cl_kernel kernel = clCreateKernel(s.program, "k_mod_mul_ptx", &err);
+	if (err != CL_SUCCESS) {
+		return false;
+	}
+	clReleaseKernel(kernel);
+	return true;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Host-side reference arithmetic (independent of the OpenCL code)           */
 /* ------------------------------------------------------------------------ */
@@ -217,6 +233,32 @@ inline mp_number refMulModWordSub(const mp_number & r, const uint32_t w, const b
 	mp_number out = r;
 	mpSub(out, t);
 	return out;
+}
+
+// Reference for mp_mul_word_add_extra:
+//   (r || extra) += a * w, as a nine-word accumulation, returning the carry out
+//   of the ninth word. Built as the full product first and then one addition,
+//   which is neither of the ways the kernels do it.
+inline uint32_t refMulWordAddExtra(mp_number & r, const mp_number & a, const uint32_t w, uint32_t & extra) {
+	uint32_t product[MP_NWORDS + 1] = { 0 };
+	uint64_t carry = 0;
+	for (int i = 0; i < MP_NWORDS; ++i) {
+		const uint64_t t = (uint64_t)a.d[i] * w + carry;
+		product[i] = (uint32_t)t;
+		carry = t >> 32;
+	}
+	product[MP_NWORDS] = (uint32_t)carry;
+
+	uint64_t c = 0;
+	for (int i = 0; i < MP_NWORDS; ++i) {
+		const uint64_t t = (uint64_t)r.d[i] + product[i] + c;
+		r.d[i] = (uint32_t)t;
+		c = t >> 32;
+	}
+
+	const uint64_t t = (uint64_t)extra + product[MP_NWORDS] + c;
+	extra = (uint32_t)t;
+	return (uint32_t)(t >> 32);
 }
 
 // Full 512-bit product of two 256-bit numbers (schoolbook)

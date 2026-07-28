@@ -61,6 +61,140 @@ void mp_mod_mul_old(mp_number * const r, const mp_number * const X, const mp_num
 }
 
 /* ------------------------------------------------------------------------ */
+/* Inline-PTX multiprecision variants                                       */
+/* ------------------------------------------------------------------------ */
+/* On NVIDIA, profanity.cl compiles two implementations of the two innermost
+ * multiprecision routines — one portable, one written in inline PTX so the
+ * carries stay in the hardware flag — and the rest of the file gets the PTX
+ * pair. Everywhere else only the portable pair exists.
+ *
+ * The kernels below reach both directly, so that on a device that has them the
+ * two can be checked against each other bit for bit on the same inputs, and
+ * timed against each other without rebuilding. Whether they exist at all is
+ * PROFANITY_PTX_MP, which the host discovers by asking for a kernel by name and
+ * seeing whether the device has one — see hasPtxKernels in testutil.hpp.
+ *
+ * Copies of mp_mod_mul that pin which pair they call, on the same grounds as
+ * mp_mod_mul_old above: the routine under test is two levels down from the one
+ * worth timing, and the loop that calls it is four lines. */
+
+void mp_mod_mul_portable(mp_number * const r, const mp_number * const X, const mp_number * const Y) {
+	mp_number Z = { {0} };
+	mp_word extraWord;
+
+	for (int i = MP_WORDS - 1; i >= 0; --i) {
+		extraWord = Z.d[7]; Z.d[7] = Z.d[6]; Z.d[6] = Z.d[5]; Z.d[5] = Z.d[4]; Z.d[4] = Z.d[3]; Z.d[3] = Z.d[2]; Z.d[2] = Z.d[1]; Z.d[1] = Z.d[0]; Z.d[0] = 0;
+		bool overflow = mp_mul_word_add_extra_portable(&Z, X, Y->d[i], &extraWord);
+		mp_mul_mod_word_sub_portable(&Z, extraWord, overflow);
+	}
+
+	*r = Z;
+}
+
+__kernel void k_mul_word_add_extra_portable(
+		__global mp_number * const R,
+		__global const mp_number * const A,
+		__global const uint * const W,
+		__global uint * const E,
+		__global uint * const OVF) {
+	const size_t id = get_global_id(0);
+	mp_number r = R[id];
+	const mp_number a = A[id];
+	mp_word e = E[id];
+	OVF[id] = mp_mul_word_add_extra_portable(&r, &a, W[id], &e);
+	R[id] = r;
+	E[id] = e;
+}
+
+__kernel void k_mul_mod_word_sub_portable(__global mp_number * const r, __global const uint * const w, __global const uint * const withModHigher) {
+	const size_t id = get_global_id(0);
+	mp_number x = r[id];
+	mp_mul_mod_word_sub_portable(&x, w[id], withModHigher[id] != 0);
+	r[id] = x;
+}
+
+__kernel void k_mod_mul_portable(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_portable(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void bench_mod_mul_portable(__global mp_number * const X, __global const mp_number * const Y, const uint iterations) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	const mp_number y = Y[id];
+
+	for (uint i = 0; i < iterations; ++i) {
+		mp_mod_mul_portable(&x, &x, &y);
+	}
+
+	X[id] = x;
+}
+
+#ifdef PROFANITY_PTX_MP
+
+void mp_mod_mul_ptx(mp_number * const r, const mp_number * const X, const mp_number * const Y) {
+	mp_number Z = { {0} };
+	mp_word extraWord;
+
+	for (int i = MP_WORDS - 1; i >= 0; --i) {
+		extraWord = Z.d[7]; Z.d[7] = Z.d[6]; Z.d[6] = Z.d[5]; Z.d[5] = Z.d[4]; Z.d[4] = Z.d[3]; Z.d[3] = Z.d[2]; Z.d[2] = Z.d[1]; Z.d[1] = Z.d[0]; Z.d[0] = 0;
+		bool overflow = mp_mul_word_add_extra_ptx(&Z, X, Y->d[i], &extraWord);
+		mp_mul_mod_word_sub_ptx(&Z, extraWord, overflow);
+	}
+
+	*r = Z;
+}
+
+__kernel void k_mul_word_add_extra_ptx(
+		__global mp_number * const R,
+		__global const mp_number * const A,
+		__global const uint * const W,
+		__global uint * const E,
+		__global uint * const OVF) {
+	const size_t id = get_global_id(0);
+	mp_number r = R[id];
+	const mp_number a = A[id];
+	mp_word e = E[id];
+	OVF[id] = mp_mul_word_add_extra_ptx(&r, &a, W[id], &e);
+	R[id] = r;
+	E[id] = e;
+}
+
+__kernel void k_mul_mod_word_sub_ptx(__global mp_number * const r, __global const uint * const w, __global const uint * const withModHigher) {
+	const size_t id = get_global_id(0);
+	mp_number x = r[id];
+	mp_mul_mod_word_sub_ptx(&x, w[id], withModHigher[id] != 0);
+	r[id] = x;
+}
+
+__kernel void k_mod_mul_ptx(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_ptx(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void bench_mod_mul_ptx(__global mp_number * const X, __global const mp_number * const Y, const uint iterations) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	const mp_number y = Y[id];
+
+	for (uint i = 0; i < iterations; ++i) {
+		mp_mod_mul_ptx(&x, &x, &y);
+	}
+
+	X[id] = x;
+}
+
+#endif /* PROFANITY_PTX_MP */
+
+/* ------------------------------------------------------------------------ */
 /* Correctness / equivalence test kernels                                   */
 /* ------------------------------------------------------------------------ */
 

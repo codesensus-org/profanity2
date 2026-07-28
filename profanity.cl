@@ -77,6 +77,27 @@
 #define MP_BITS 32
 #define bswap32(n) (rotate(n & 0x00FF00FF, 24U)|(rotate(n, 8U) & 0x00FF00FF))
 
+// Whether the multiprecision routines below may use the carry flag directly.
+//
+// Every carry in this file is detected by comparison — `c = t > a ? 1 : (t == a
+// ? c : 0)` and its variants — because OpenCL C has no way to name the flag the
+// hardware sets for free. That costs a setp and a selp per word per carry.
+// NVIDIA's OpenCL frontend shares NVVM with CUDA and accepts inline PTX, which
+// does have a way to name it, so on that one vendor the same arithmetic can be
+// written in about a fifth of the instructions.
+//
+// __NV_CL_C_VERSION is defined by that frontend and by no other, which is what
+// this has to key off rather than anything the host knows: profanity.cpp builds
+// one program for every device in the context at once, so a machine with an
+// NVIDIA card and an AMD one compiles this file twice from the same string and
+// only the vendor's own macro tells the two compilations apart.
+//
+// Inline PTX in OpenCL is not something NVIDIA documents, so -D PROFANITY_NO_PTX
+// turns it off and takes the portable path on every device.
+#if defined(__NV_CL_C_VERSION) && !defined(PROFANITY_NO_PTX)
+#define PROFANITY_PTX_MP 1
+#endif
+
 typedef uint mp_word;
 typedef struct __attribute__((aligned(16))) {
 	mp_word d[MP_WORDS];
@@ -290,7 +311,7 @@ void mp_shr(mp_number * const r) {
 
 // Multiplies a number with a word and adds it to an existing number with an extra word, overflow of the extra word is signalled in return value
 // This is a special function only used for modular multiplication
-mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
+mp_word mp_mul_word_add_extra_portable(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
 	mp_word cM = 0; // Carry for multiplication
 	mp_word cA = 0; // Carry for addition
 	mp_word tM = 0; // Temporary storage for multiplication
@@ -305,6 +326,82 @@ mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, co
 
 	*extra += cM + cA;
 	return *extra < cM ? 1 : (*extra == cM ? cA : 0);
+}
+
+#ifdef PROFANITY_PTX_MP
+/* The same nine-word accumulation, written so the carries stay in the flag.
+ *
+ * What the loop above computes is (r || extra) += a * w, where the product is
+ * built a word at a time and its top word falls out at the end as cM. Split by
+ * where each half of a partial product lands, that is
+ *
+ *     (r || extra) += sum_i lo(a_i * w) << 32i      -- words 0..7
+ *                   + sum_i hi(a_i * w) << 32(i+1)  -- words 1..8
+ *
+ * and each of those sums is one straight carry chain. mad.lo.cc/madc.lo.cc runs
+ * the first and mad.hi.cc/madc.hi.cc the second, eighteen instructions against
+ * the eighty or so the comparisons cost.
+ *
+ * Both chains have to be in one asm block. CC.CF does not survive whatever the
+ * compiler decides to schedule between two of them, and nothing in the operand
+ * constraints tells it not to — splitting this in half is the way to get results
+ * that are wrong only sometimes, and only on some drivers.
+ *
+ * The overflow out of word 8 is a single bit for the same reason it is above:
+ * (r || extra) is below 2^288 and a * w is below 2^288, so their sum is below
+ * 2^289 and crosses 2^288 at most once, whichever chain happens to carry it.
+ */
+mp_word mp_mul_word_add_extra_ptx(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
+	mp_word r0 = r->d[0], r1 = r->d[1], r2 = r->d[2], r3 = r->d[3];
+	mp_word r4 = r->d[4], r5 = r->d[5], r6 = r->d[6], r7 = r->d[7];
+
+	const mp_word a0 = a->d[0], a1 = a->d[1], a2 = a->d[2], a3 = a->d[3];
+	const mp_word a4 = a->d[4], a5 = a->d[5], a6 = a->d[6], a7 = a->d[7];
+
+	mp_word e = *extra;
+	mp_word overflow;
+
+	asm volatile(
+		"mad.lo.cc.u32  %0, %10, %18, %0;\n\t"
+		"madc.lo.cc.u32 %1, %11, %18, %1;\n\t"
+		"madc.lo.cc.u32 %2, %12, %18, %2;\n\t"
+		"madc.lo.cc.u32 %3, %13, %18, %3;\n\t"
+		"madc.lo.cc.u32 %4, %14, %18, %4;\n\t"
+		"madc.lo.cc.u32 %5, %15, %18, %5;\n\t"
+		"madc.lo.cc.u32 %6, %16, %18, %6;\n\t"
+		"madc.lo.cc.u32 %7, %17, %18, %7;\n\t"
+		"addc.cc.u32    %8, %8, 0;\n\t"
+		"addc.u32       %9, 0, 0;\n\t"
+
+		"mad.hi.cc.u32  %1, %10, %18, %1;\n\t"
+		"madc.hi.cc.u32 %2, %11, %18, %2;\n\t"
+		"madc.hi.cc.u32 %3, %12, %18, %3;\n\t"
+		"madc.hi.cc.u32 %4, %13, %18, %4;\n\t"
+		"madc.hi.cc.u32 %5, %14, %18, %5;\n\t"
+		"madc.hi.cc.u32 %6, %15, %18, %6;\n\t"
+		"madc.hi.cc.u32 %7, %16, %18, %7;\n\t"
+		"madc.hi.cc.u32 %8, %17, %18, %8;\n\t"
+		"addc.u32       %9, %9, 0;"
+		: "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4),
+		  "+r"(r5), "+r"(r6), "+r"(r7), "+r"(e), "=r"(overflow)
+		: "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4),
+		  "r"(a5), "r"(a6), "r"(a7), "r"(w));
+
+	r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+	r->d[4] = r4; r->d[5] = r5; r->d[6] = r6; r->d[7] = r7;
+	*extra = e;
+
+	return overflow;
+}
+#endif /* PROFANITY_PTX_MP */
+
+// Which of the two the rest of this file gets.
+inline mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, const mp_word w, mp_word * const extra) {
+#ifdef PROFANITY_PTX_MP
+	return mp_mul_word_add_extra_ptx(r, a, w, extra);
+#else
+	return mp_mul_word_add_extra_portable(r, a, w, extra);
+#endif
 }
 
 // Multiplies a number with a word, potentially adds modhigher to it, and then subtracts it from
@@ -327,14 +424,26 @@ mp_word mp_mul_word_add_extra(mp_number * const r, const mp_number * const a, co
 // So instead of multiplying q by the full 256-bit p and subtracting, we multiply q by the
 // 33-bit pmod and add. This reduces the amount of bits used, giving us 20-35% speed improvements.
 //
-void mp_mul_mod_word_sub(mp_number * const r, const mp_word w, const bool withModHigher) {
+// Two implementations of that addition follow. They differ only in how the
+// three words go into r and not in what the three words are, so what they are
+// is worked out once, here.
+
+// q * pmod, which is never more than three words wide: pmod is 33 bits, so its
+// product with a single word is 65, and the modhigher term shifts one copy of
+// it up by a word.
+inline void mp_mod_word_addend(const mp_word w, const bool withModHigher, mp_word * const p0, mp_word * const p1, mp_word * const p2) {
 	const mp_word lo977 = 977u * w;
 	const mp_word hi977 = mul_hi(977u, w);
 
-	const mp_word p0 = lo977;
+	*p0 = lo977;
 	const ulong p1_full = (ulong)w + hi977 + (withModHigher ? 0x000003D1u : 0u);
-	const mp_word p1 = (mp_word)p1_full;
-	const mp_word p2 = (mp_word)(p1_full >> 32) + (withModHigher ? 1u : 0u);
+	*p1 = (mp_word)p1_full;
+	*p2 = (mp_word)(p1_full >> 32) + (withModHigher ? 1u : 0u);
+}
+
+void mp_mul_mod_word_sub_portable(mp_number * const r, const mp_word w, const bool withModHigher) {
+	mp_word p0, p1, p2;
+	mp_mod_word_addend(w, withModHigher, &p0, &p1, &p2);
 
 	ulong s = (ulong)r->d[0] + p0;
 	r->d[0] = (mp_word)s;
@@ -353,6 +462,48 @@ void mp_mul_mod_word_sub(mp_number * const r, const mp_word w, const bool withMo
 		r->d[i] = (mp_word)s;
 		c = (mp_word)(s >> 32);
 	}
+}
+
+#ifdef PROFANITY_PTX_MP
+/* The same addition as one carry chain rather than eight widening adds.
+ *
+ * Less of a win than the multiply above — a 64-bit add already lowers to
+ * add.cc/addc and the compiler does see through the pattern — but the five
+ * words past p2 exist only to carry, and written this way they cost one
+ * instruction each instead of an extension, an add and a shift.
+ */
+void mp_mul_mod_word_sub_ptx(mp_number * const r, const mp_word w, const bool withModHigher) {
+	mp_word p0, p1, p2;
+	mp_mod_word_addend(w, withModHigher, &p0, &p1, &p2);
+
+	mp_word r0 = r->d[0], r1 = r->d[1], r2 = r->d[2], r3 = r->d[3];
+	mp_word r4 = r->d[4], r5 = r->d[5], r6 = r->d[6], r7 = r->d[7];
+
+	asm volatile(
+		"add.cc.u32  %0, %0, %8;\n\t"
+		"addc.cc.u32 %1, %1, %9;\n\t"
+		"addc.cc.u32 %2, %2, %10;\n\t"
+		"addc.cc.u32 %3, %3, 0;\n\t"
+		"addc.cc.u32 %4, %4, 0;\n\t"
+		"addc.cc.u32 %5, %5, 0;\n\t"
+		"addc.cc.u32 %6, %6, 0;\n\t"
+		"addc.u32    %7, %7, 0;"
+		: "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3),
+		  "+r"(r4), "+r"(r5), "+r"(r6), "+r"(r7)
+		: "r"(p0), "r"(p1), "r"(p2));
+
+	r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+	r->d[4] = r4; r->d[5] = r5; r->d[6] = r6; r->d[7] = r7;
+}
+#endif /* PROFANITY_PTX_MP */
+
+// Which of the two the rest of this file gets.
+inline void mp_mul_mod_word_sub(mp_number * const r, const mp_word w, const bool withModHigher) {
+#ifdef PROFANITY_PTX_MP
+	mp_mul_mod_word_sub_ptx(r, w, withModHigher);
+#else
+	mp_mul_mod_word_sub_portable(r, w, withModHigher);
+#endif
 }
 
 // Modular multiplication. Based on Algorithm 3 (and a series of hunches) from this article:

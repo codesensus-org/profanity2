@@ -488,7 +488,18 @@ int main(int argc, char * * argv) {
 			+ " -D PROFANITY_CREATE2_WORDS=" + toString(PROFANITY_CREATE2_WORDS)
 			+ " -D PROFANITY_CREATE2_COUNTER=" + toString(PROFANITY_CREATE2_COUNTER)
 			+ " -D PROFANITY_VARIANTS=" + toString(variants)
-			+ " -D PROFANITY_ROUNDS=" + toString(rounds);
+			+ " -D PROFANITY_ROUNDS=" + toString(rounds)
+			// The kernel decides for itself whether to use the inline-PTX
+			// multiprecision routines, from a macro only NVIDIA's compiler
+			// defines. This carries the way out of that decision across, since
+			// the kernel compiler has no other way of hearing about it — it is
+			// the host that was built with -DPROFANITY_NO_PTX, not the device.
+			// It joins the fingerprint below along with the rest, so a cached
+			// binary built the other way is not reused for this one.
+#ifdef PROFANITY_NO_PTX
+			+ " -D PROFANITY_NO_PTX=1"
+#endif
+			;
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
 
