@@ -1597,6 +1597,29 @@ __kernel void profanity_iterate_score_##NAME( \
 	} \
 }
 
+// A run enqueues one scoring kernel out of the eighteen this file defines —
+// nine scorers against each of the two targets — and the other seventeen are
+// compiled for nothing. That is not a rounding error in the build: the iterate
+// kernels carry the point arithmetic, the shared inverse and keccak through
+// PROFANITY_ROUNDS of them each, and dropping the eight a run will not ask for
+// takes about four fifths off the compile. What it buys is the wait before a
+// search starts, on a machine that is being paid for throughout it.
+//
+// So the host names the one kernel it is going to create, and this builds that.
+// Neither macro defined is the standalone case — the tests compile this file
+// with their own harness and ask for kernels by name — and builds all of them.
+// The second condition is what empties the half a run does not touch: a CREATE2
+// search names a create2 scorer, and needs no iterate kernel at all.
+//
+// The indirection is what lets a macro be the argument. PROFANITY_SCORE_KERNEL
+// pastes its parameter onto a kernel name, and a parameter next to ## is not
+// expanded first, so passing the selector straight in would spell the kernel
+// after the macro rather than after its value.
+#define PROFANITY_SCORE_KERNEL_EXPAND(NAME) PROFANITY_SCORE_KERNEL(NAME)
+
+#if defined(PROFANITY_ITERATE_SCORER)
+PROFANITY_SCORE_KERNEL_EXPAND(PROFANITY_ITERATE_SCORER)
+#elif !defined(PROFANITY_CREATE2_SCORER)
 PROFANITY_SCORE_KERNEL(benchmark)
 PROFANITY_SCORE_KERNEL(matching)
 PROFANITY_SCORE_KERNEL(leading)
@@ -1606,6 +1629,7 @@ PROFANITY_SCORE_KERNEL(zerobytes)
 PROFANITY_SCORE_KERNEL(leadingrange)
 PROFANITY_SCORE_KERNEL(mirror)
 PROFANITY_SCORE_KERNEL(doubles)
+#endif
 
 /* ------------------------------------------------------------------------ */
 /* CREATE2                                                                  */
@@ -1720,6 +1744,12 @@ __kernel void profanity_create2_score_##NAME( \
 	} \
 }
 
+// The same selection as the iterate kernels above, and for the same reason.
+#define PROFANITY_CREATE2_KERNEL_EXPAND(NAME) PROFANITY_CREATE2_KERNEL(NAME)
+
+#if defined(PROFANITY_CREATE2_SCORER)
+PROFANITY_CREATE2_KERNEL_EXPAND(PROFANITY_CREATE2_SCORER)
+#elif !defined(PROFANITY_ITERATE_SCORER)
 PROFANITY_CREATE2_KERNEL(benchmark)
 PROFANITY_CREATE2_KERNEL(matching)
 PROFANITY_CREATE2_KERNEL(leading)
@@ -1729,3 +1759,4 @@ PROFANITY_CREATE2_KERNEL(zerobytes)
 PROFANITY_CREATE2_KERNEL(leadingrange)
 PROFANITY_CREATE2_KERNEL(mirror)
 PROFANITY_CREATE2_KERNEL(doubles)
+#endif

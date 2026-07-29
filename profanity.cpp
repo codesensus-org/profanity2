@@ -503,6 +503,22 @@ int main(int argc, char * * argv) {
 #ifdef PROFANITY_NO_PTX
 			+ " -D PROFANITY_NO_PTX=1"
 #endif
+			// Only the scoring kernel this run will enqueue is built. Which one
+			// that is has been settled by here — the mode chose the scorer and
+			// --create2 or --contract chose the target — and it is the same name
+			// Dispatcher asks clCreateKernel for, so naming it twice is the one
+			// thing to watch: a program built for one scorer and a dispatcher
+			// asking for another fails at kernel creation rather than quietly,
+			// which is what kernelName() being the single spelling of it buys.
+			//
+			// This belongs in the build options rather than anywhere else
+			// precisely because a cached binary is filed under a fingerprint of
+			// them: a worker that runs a prefix search and then a zero-bytes one
+			// wants the second compiled rather than handed the first's binary,
+			// and it gets that for free by the name it looks under changing.
+			+ (mode.target == CREATE2
+				? " -D PROFANITY_CREATE2_SCORER=" + mode.scorer
+				: " -D PROFANITY_ITERATE_SCORER=" + mode.scorer)
 			;
 
 		const uint64_t kernelId = fingerprint(strKeccak + strVanity + strBuildOptions);
