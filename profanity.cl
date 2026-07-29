@@ -659,6 +659,13 @@ void profanity_init_seed(__global const point * const precomp, point * const p, 
 	}
 }
 
+// The seeding, which a CREATE2 search has nothing to seed: it walks over salts
+// rather than points, and every scalar multiplication below is code compiled
+// into its program for a kernel it will never enqueue. Dispatcher only creates
+// these two for a search with a key in it, so this follows the same condition
+// the target already decides — see initBegin and initCreate2.
+#if !defined(PROFANITY_CREATE2_SCORER)
+
 // The part of every work item's starting point that does not depend on the work
 // item. Only the top limb of the seed carries the index, so the other three
 // contribute the same point to all of them — three quarters of the scalar
@@ -737,6 +744,8 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 		pResult[id].found = 0;
 	}
 }
+
+#endif /* !PROFANITY_CREATE2_SCORER */
 
 // This kernel calculates several modular inversions at once with just one inverse.
 // It's an implementation of Algorithm 2.11 from Modern Computer Arithmetic:
@@ -1654,9 +1663,14 @@ PROFANITY_SCORE_KERNEL(doubles)
 // of that kernel is the seeding a CREATE2 search has nothing to seed. Without a
 // score floor a slot is written only by the first work item to reach it and
 // read for as long as the run lasts, so it has to start at zero.
+//
+// The other side of the condition above: a search with a key in it clears the
+// buffer in profanity_init and never enqueues this.
+#if !defined(PROFANITY_ITERATE_SCORER)
 __kernel void profanity_create2_init(__global result * const pResult) {
 	pResult[get_global_id(0)].found = 0;
 }
+#endif /* !PROFANITY_ITERATE_SCORER */
 
 // The state a candidate's hash starts from.
 //

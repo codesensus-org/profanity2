@@ -221,10 +221,15 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_worksizeLocal(worksizeLocal),
 	m_clScoreMax(parent.m_clScoreMin > 0 ? parent.m_clScoreMin - 1 : 0),
 	m_clQueue(createQueue(clContext, clDeviceId) ),
-	m_kernelInit( createKernel(clProgram, "profanity_init") ),
-	m_kernelInitUniform( createKernel(clProgram, "profanity_init_uniform") ),
+	// The seeding kernels and the CREATE2 one that stands in for them are only
+	// compiled into the program for the target that enqueues them, so asking for
+	// the other would throw on a kernel that is not there. This is the same
+	// condition initBegin picks its path by, and the kernel left out is the one
+	// that path never touches.
+	m_kernelInit(mode.target == CREATE2 ? (cl_kernel) NULL : createKernel(clProgram, "profanity_init")),
+	m_kernelInitUniform(mode.target == CREATE2 ? (cl_kernel) NULL : createKernel(clProgram, "profanity_init_uniform")),
 	m_kernelIterate(createKernel(clProgram, mode.kernelName())),
-	m_kernelCreate2Init(createKernel(clProgram, "profanity_create2_init")),
+	m_kernelCreate2Init(mode.target == CREATE2 ? createKernel(clProgram, "profanity_create2_init") : (cl_kernel) NULL),
 	m_memPrecomp(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, sizeof(g_precomp), g_precomp),
 	// The points a search keeps in flight are three quarters of a gigabyte
 	// apiece at the defaults and more than twice that as the worker tunes it.
