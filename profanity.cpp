@@ -155,33 +155,13 @@ uint64_t fingerprint(const std::string & s) {
 }
 
 unsigned int getUniqueDeviceIdentifier(const cl_device_id & deviceId) {
-	// Where a device sits on the PCI bus is what tells it from its siblings, and
-	// both of the extensions that answer that are vendor ones: a CPU device has
-	// no such place, and a driver without the extension will not say. Neither
-	// call is checked by clGetWrapper, so what came back on a device that has
-	// neither used to be whatever was on the stack — a different answer each
-	// run, and the kernel cache is filed under this. That meant recompiling
-	// every start and leaving another cache file behind each time. The name is
-	// the fallback: dull, but the same tomorrow.
-	//
-	// Recent Khronos headers define CL_DEVICE_TOPOLOGY_AMD but dropped the
-	// cl_device_topology_amd struct and the TYPE_PCIE constant, hence the
-	// second condition.
-#if defined(CL_DEVICE_TOPOLOGY_AMD) && defined(CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD)
-	cl_device_topology_amd topology;
-	if (clGetDeviceInfo(deviceId, CL_DEVICE_TOPOLOGY_AMD, sizeof(topology), &topology, NULL) == CL_SUCCESS
-			&& topology.raw.type == CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD) {
-		return (topology.pcie.bus << 16) + (topology.pcie.device << 8) + topology.pcie.function;
-	}
-#endif
-	cl_int bus_id = 0;
-	cl_int slot_id = 0;
-	if (clGetDeviceInfo(deviceId, CL_DEVICE_PCI_BUS_ID_NV, sizeof(bus_id), &bus_id, NULL) == CL_SUCCESS
-			&& clGetDeviceInfo(deviceId, CL_DEVICE_PCI_SLOT_ID_NV, sizeof(slot_id), &slot_id, NULL) == CL_SUCCESS) {
-		return (bus_id << 16) + slot_id;
-	}
-
-	return (unsigned int) fingerprint(clGetWrapperString(clGetDeviceInfo, deviceId, CL_DEVICE_NAME));
+	// Key the kernel cache on the device MODEL (name + driver), not the PCI slot. The
+	// compiled binary is per-architecture, so this makes one cache file serve every
+	// identical GPU on the machine and, crucially, be portable between machines with the
+	// same GPU -- a prebuilt cache can ship in the image so a fresh host never compiles.
+	const std::string name = clGetWrapperString(clGetDeviceInfo, deviceId, CL_DEVICE_NAME);
+	const std::string drv  = clGetWrapperString(clGetDeviceInfo, deviceId, CL_DRIVER_VERSION);
+	return (unsigned int) fingerprint(name + "|" + drv);
 }
 
 template <typename T> bool printResult(const T & t, const cl_int & err) {
@@ -581,9 +561,14 @@ int main(int argc, char * * argv) {
 			return 1;
 		}
 
-		cl_program clProgram;
-		if (vDeviceBinary.size() == vDevices.size()) {
-			// Create program from binaries
+		cl_program clProgram = NULL;
+		bool bBuildFromSource = (vDeviceBinary.size() != vDevices.size());
+
+		// Try the cached compiled binary first. A shipped/prebuilt cache can be
+		// stale (e.g. after a GPU driver upgrade), so ANY failure here -- a bad
+		// clCreateProgramWithBinary or a clBuildProgram that rejects the binary --
+		// falls back to compiling from source instead of aborting the run.
+		if (!bBuildFromSource) {
 			bUsedCache = true;
 
 			std::cout << "  Loading kernel from binary..." << std::flush;
@@ -595,11 +580,31 @@ int main(int argc, char * * argv) {
 			cl_int * pStatus = new cl_int[vDevices.size()];
 
 			clProgram = clCreateProgramWithBinary(clContext, vDevices.size(), vDevices.data(), vDeviceBinarySize.data(), pKernels, pStatus, &errorCode);
-			if(printResult(clProgram, errorCode)) {
-				return 1;
+			delete[] pKernels;
+			delete[] pStatus;
+
+			if (clProgram == NULL || errorCode != CL_SUCCESS) {
+				std::cout << "failed (" << toString(errorCode) << "), recompiling from source" << std::endl;
+				if (clProgram) { clReleaseProgram(clProgram); clProgram = NULL; }
+				bBuildFromSource = true;
+				bUsedCache = false;
+			} else {
+				std::cout << "OK" << std::endl;
+				std::cout << "  Building program..." << std::flush;
+				const cl_int resBuild = clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL);
+				if (resBuild != CL_SUCCESS) {
+					std::cout << "cached binary rejected (" << toString(resBuild) << "), recompiling from source" << std::endl;
+					clReleaseProgram(clProgram);
+					clProgram = NULL;
+					bBuildFromSource = true;
+					bUsedCache = false;
+				} else {
+					std::cout << "OK" << std::endl;
+				}
 			}
-		} else {
-			// Create a program from the kernel source
+		}
+
+		if (bBuildFromSource) {
 			std::cout << "  Compiling kernel..." << std::flush;
 			const char * szKernels[] = { strKeccak.c_str(), strVanity.c_str() };
 
@@ -607,24 +612,23 @@ int main(int argc, char * * argv) {
 			if (printResult(clProgram, errorCode)) {
 				return 1;
 			}
-		}
 
-		// Build the program
-		std::cout << "  Building program..." << std::flush;
-		if (printResult(clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL))) {
+			std::cout << "  Building program..." << std::flush;
+			if (printResult(clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL))) {
 #ifdef PROFANITY_DEBUG
-			std::cout << std::endl;
-			std::cout << "build log:" << std::endl;
+				std::cout << std::endl;
+				std::cout << "build log:" << std::endl;
 
-			size_t sizeLog;
-			clGetProgramBuildInfo(clProgram, vDevices[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &sizeLog);
-			char * const szLog = new char[sizeLog];
-			clGetProgramBuildInfo(clProgram, vDevices[0], CL_PROGRAM_BUILD_LOG, sizeLog, szLog, NULL);
+				size_t sizeLog;
+				clGetProgramBuildInfo(clProgram, vDevices[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &sizeLog);
+				char * const szLog = new char[sizeLog];
+				clGetProgramBuildInfo(clProgram, vDevices[0], CL_PROGRAM_BUILD_LOG, sizeLog, szLog, NULL);
 
-			std::cout << szLog << std::endl;
-			delete[] szLog;
+				std::cout << szLog << std::endl;
+				delete[] szLog;
 #endif
-			return 1;
+				return 1;
+			}
 		}
 
 		// Save binary to improve future start times
