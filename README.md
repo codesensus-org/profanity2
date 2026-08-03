@@ -7,7 +7,7 @@ Tell your friends it's to optimize gas with zero bytes, but really it's to flex 
 ![Screenshot](/img/screenshot.png?raw=true "Wow! That's a lot of zeros!")
 
 This repository is a performance-focused fork of [1inch/profanity2](https://github.com/1inch/profanity2), which is itself the safe rework of the original `profanity`.\
-Upstream's safety model is intact, and this fork rebuilds a highly optimized search loop around what modern GPUs are actually fast at: an RTX 5090 searches **5.6 GH/s** (**3.5x** faster on the same hardware).
+Upstream's safety model is intact, and this fork rebuilds a highly optimized search loop around what modern GPUs are actually fast at: an RTX 5090 searches **5.8 GH/s** (over **3x** faster on the same hardware).
 
 Supports finding leading zeros (`0x000000000000...`), arbitrary prefixes/suffixes (`0xdeadbeef...`), a number of zero bytes (gas optimized), a contract landing on a chosen prefix, and more.\
 This fork also adds CREATE2 salt mining, floating pattern masks, streamed results above a score bar, and an autotuner that finds the right flags for whichever card it's running on.
@@ -65,7 +65,7 @@ automorphisms, maps that turn one point into another with no point arithmetic:
 the point itself, its negation, its two images under the curve's endomorphism,
 and their negations. `--variants 6` scores all six addresses per point
 addition, paying only a keccak and a cheap modular operation for each extra
-one. This nearly doubles throughput on an RTX 4090 and is the single biggest
+one. This nearly doubles throughput on an RTX 5090 and is the single biggest
 win in the fork.
 
 **Practicalities** — multiple GPUs are used automatically (`-s` skips one);
@@ -96,19 +96,17 @@ program wrong on other hardware — correctness is covered by tests everywhere �
 but they say where it is fast.
 
 **It is tuned on recent NVIDIA cards.** The measuring and tuning behind this
-fork happened on RTX 3060/4090/5090 machines. The inline PTX path is
+fork happened specifically for RTX 5090 configurations. The inline PTX path is
 NVIDIA-only by nature (other vendors take the portable path automatically, and
 `make CDEFINES=-DPROFANITY_NO_PTX` forces it everywhere if a driver ever
 misbehaves). AMD and Intel GPUs build and run — upstream's ROCm fixes are
-included — but nobody has tuned for them, and the flags that make a 4090 fly
-can make an older card slower than the defaults: two-level inversion at
-`-S 8 -G 128` measured **+38%** on an RTX 4090, **−29%** on an RTX 3060 and
-**−62%** on a GTX 1070. This is why it is opt-in and why `autotune.py` exists.
+included — but the tuning attention has gone to NVIDIA. Optimal parameters
+vary from a card to the next. That is why `autotune.py` exists.
 
 **Defaults are portable, not fast.** Out of the box the program runs the safe
 configuration everywhere. The headline numbers need the tuned flags, and the
 right ones vary by card by more than any default could cover — run
-`./autotune.py` once per machine (~10–20 minutes) and use what it prints.
+`./autotune.py` once per machine (~20–30 minutes) and use what it prints.
 
 **Peak throughput costs start-up time.** Large inversion strips make the OpenCL
 compile long: on the 4090, `-S 32` compiles in 73s cold against 34s with
@@ -135,23 +133,20 @@ on the card you intend to mine with.
 
 | GPU | account | `--contract` | `--create2` | recommended flags |
 | --- | --- | --- | --- | --- |
-| RTX 5090 | 5.6 GH/s | 3.9 GH/s | 6.3 GH/s | `-I 65536 -S 32 -G 128 -V 6 -R 8` |
-| RTX 4090 | 3.8 GH/s | 2.7 GH/s | 4.3 GH/s | `-I 16384 -S 32 -G 512 -V 6` |
-| RTX 5080 | 2.9 GH/s | 2.0 GH/s | 3.8 GH/s | defaults |
-| RTX 5070 | 876 MH/s | 610 MH/s | 2.4 GH/s | `-I 393216` |
-| RX 7900 XTX | 592 MH/s | 410 MH/s | 1.6 GH/s | defaults |
-| RTX 3070 | 536 MH/s | 380 MH/s | 1.5 GH/s | `-I 262144` |
-| Apple M4 Max<br/>(40-core GPU) | 467 MH/s | 330 MH/s | 1.3 GH/s | defaults |
-| RTX 3060 | 330 MH/s | 230 MH/s | 900 MH/s | defaults |
-| RX 6700 XT | 240 MH/s | 170 MH/s | 650 MH/s | defaults |
-| GTX 1070 | 225 MH/s | 160 MH/s | 620 MH/s | `-I 196608` |
-| Apple M1<br/>(8-core GPU) | 60 MH/s | 42 MH/s | 170 MH/s | defaults |
+| RTX 5090 | 5.8 GH/s | 3.1 GH/s | 6.2 GH/s | `-i 510 -I 65536 -S 64 -G 128 -V 6` |
+| RTX 4090 | 4.0 GH/s | 2.1 GH/s | 4.6 GH/s | `-i 340 -I 131072 -S 32 -G 128 -V 6` |
+| RTX 5080 | 3.0 GH/s | 1.6 GH/s | 3.0 GH/s | `-i 510 -I 131072 -S 64 -G 128 -V 6` |
+| RX 7900 XTX | 1.7 GH/s | 938 MH/s | 2.1 GH/s | `-I 32768 -S 16 -G 128 -V 6` |
+| RTX 5070 | 1.7 GH/s | 918 MH/s | 1.7 GH/s | `-I 65536 -S 32 -G 128 -V 6` |
+| RTX 3070 | 986 MH/s | 528 MH/s | 1.1 GH/s | `-I 131072 -S 32 -G 512 -V 6` |
+| RTX 3060 | 680 MH/s | 359 MH/s | 753 MH/s | `-I 65536 -S 64 -G 128 -V 6` |
+| GTX 1070 | 413 MH/s | 184 MH/s | 655 MH/s | `-I 16384 -S 64 -G 128 -V 6` |
+| Apple M2<br/>(10-core GPU) | 95 MH/s | 49 MH/s | 135 MH/s | `-S 16 -G 256 -V 6` |
 
 Figures above are per card, and multiple GPUs are used automatically and scale near-linearly.\
 For example, **45 GH/s** was measured on an eight-card RTX 5090 machine.
 
-Keep two-level inversion (`-S`/`-G`) off on cards older than Ada: it costs an RTX 3060 -29% and a GTX 1070 -62%.\
-Before a long search, run `./autotune.py` to find your optimal flags.
+Before a long search, run `./autotune.py` to find your own optimal flags.
 
 ## Quick start
 
@@ -286,7 +281,7 @@ The performance flags vary by card by more than any default can cover, so
 measure rather than guess:
 
 ```bash
-./autotune.py                 # ~10–20 minutes, prints the flags to use
+./autotune.py                 # ~20–30 minutes, prints the flags to use
 ./autotune.py --target create2  # tune the CREATE2 kernel instead, for salt mining
 ./autotune.py --cpu --quick   # a few minutes, to see what it does
 ```
