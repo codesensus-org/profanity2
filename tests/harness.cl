@@ -571,6 +571,137 @@ __kernel void k_mod_mul_old(__global const mp_number * const X, __global const m
 	R[id] = r;
 }
 
+__kernel void k_mod_mul_oneshot_portable(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_oneshot_portable(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void k_mod_sqr_portable(__global const mp_number * const X, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number r;
+	mp_mod_sqr_portable(&r, &x);
+	R[id] = r;
+}
+
+#ifdef PROFANITY_PTX_MP
+__kernel void k_mod_mul_oneshot_ptx(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_oneshot_ptx(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void k_mod_sqr_ptx(__global const mp_number * const X, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number r;
+	mp_mod_sqr_ptx(&r, &x);
+	R[id] = r;
+}
+#endif
+
+__kernel void k_mod_mul_oneshot_portable(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_oneshot_portable(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void k_mod_sqr_portable(__global const mp_number * const X, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number r;
+	mp_mod_sqr_portable(&r, &x);
+	R[id] = r;
+}
+
+#ifdef PROFANITY_PTX_MP
+__kernel void k_mod_mul_oneshot_ptx(__global const mp_number * const X, __global const mp_number * const Y, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number y = Y[id];
+	mp_number r;
+	mp_mod_mul_oneshot_ptx(&r, &x, &y);
+	R[id] = r;
+}
+
+__kernel void k_mod_sqr_ptx(__global const mp_number * const X, __global mp_number * const R) {
+	const size_t id = get_global_id(0);
+	mp_number x = X[id];
+	mp_number r;
+	mp_mod_sqr_ptx(&r, &x);
+	R[id] = r;
+}
+#endif
+
+// ---- sparse keccak EOA/contract equivalence kernels ----
+__kernel void k_keccak_eoa_ab(
+		__global const ulong * const pIn,
+		__global ulong * const pStock,
+		__global ulong * const pSpecial) {
+	const size_t id = get_global_id(0);
+	ethhash a, b;
+	for (int i = 0; i < 25; ++i) {
+		const ulong v = pIn[id * 25 + i];
+		a.q[i] = v;
+		b.q[i] = v;
+	}
+	sha3_keccakf(&a);
+	sha3_keccakf_eoa(&b);
+	for (int i = 0; i < 25; ++i) {
+		pStock[id * 25 + i] = a.q[i];
+		pSpecial[id * 25 + i] = b.q[i];
+	}
+}
+
+__kernel void k_keccak_contract_ab(
+		__global const ulong * const pIn,
+		__global ulong * const pStock,
+		__global ulong * const pSpecial) {
+	const size_t id = get_global_id(0);
+	ethhash a, b;
+	for (int i = 0; i < 25; ++i) {
+		const ulong v = pIn[id * 25 + i];
+		a.q[i] = v;
+		b.q[i] = v;
+	}
+	sha3_keccakf(&a);
+	sha3_keccakf_contract(&b);
+	for (int i = 0; i < 25; ++i) {
+		pStock[id * 25 + i] = a.q[i];
+		pSpecial[id * 25 + i] = b.q[i];
+	}
+}
+
+// ---- CREATE2 keccak equivalence kernel ----
+__kernel void k_keccak_create2_ab(
+		__global const ulong * const pIn,
+		__global ulong * const pStock,
+		__global ulong * const pSpecial) {
+	const size_t id = get_global_id(0);
+	ethhash a, b;
+	for (int i = 0; i < 25; ++i) {
+		const ulong v = pIn[id * 25 + i];
+		a.q[i] = v;
+		b.q[i] = v;
+	}
+	sha3_keccakf(&a);
+	sha3_keccakf_create2(&b);
+	for (int i = 0; i < 25; ++i) {
+		pStock[id * 25 + i] = a.q[i];
+		pSpecial[id * 25 + i] = b.q[i];
+	}
+}
+
 /* ------------------------------------------------------------------------ */
 /* Scoring                                                                  */
 /* ------------------------------------------------------------------------ */

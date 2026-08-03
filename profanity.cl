@@ -539,6 +539,184 @@ void mp_mod_mul(mp_number * const r, const mp_number * const X, const mp_number 
 	*r = Z;
 }
 
+// =====================================================================================
+// secp256k1 field prime  p = 2^256 - 2^32 - 977, therefore
+//        2^256  ==  2^32 + 977  ==  0x1000003D1   (mod p)          [ call this constant c ]
+//
+// Instead of mp_mod_mul's 8 interleaved reductions we compute the whole product first and
+// reduce ONCE:
+//   STAGE 1 : full 256x256 -> 512-bit product = low limbs L[0..7] + high limbs H[0..7]
+//   STAGE 2 : fold H back into L, because  H*2^256 == H*c (mod p).  Each high limb H[k]
+//             therefore contributes  977*H[k] at limb k  and  H[k] at limb k+1
+//             (that is exactly H[k]*(2^32 + 977)).  A single carry ripple across the 8 limbs
+//             leaves a small (< 2^33) overflow which is folded once more through c into limbs
+//             0..2, followed by one final tiny carry fold.
+//
+// The result is congruent mod p and < 2^256; it is NOT canonicalised to [0,p).  This is the
+// SAME contract stock mp_mod_mul honours (stock is itself only congruent, e.g. (p-1)^2 -> p+1)
+// and, for in-domain operands (both < p), the fold lands on the identical representative as
+// stock -- verified bit-exact on pocl over millions of random + edge + ambiguous-zone cases.
+// =====================================================================================
+
+#define MP_MOD_C_LO 0x000003D1u   // low 32 bits of c = 2^32 + 977  (977 == 0x3D1)
+
+// Shared STAGE 2 fold: given a 512-bit value as low limbs L[0..7] and high limbs H[0..7],
+// write a congruent value < 2^256 into r.  mul_hi + ulong idiom; exact on every device.
+static inline void mp_mod_reduce_fold_portable(mp_number * const r, const mp_word * const L, const mp_word * const H) {
+	// pass 1: t[0..8] = L + H*c ; H[k] -> 977*H[k] at limb k and H[k] at limb k+1
+	mp_word t[MP_WORDS + 1];
+	ulong acc = 0;
+	for (int k = 0; k < MP_WORDS + 1; ++k) {
+		if (k < MP_WORDS) acc += (ulong)L[k];
+		if (k < MP_WORDS) acc += (ulong)977u * H[k];
+		if (k >= 1)       acc += (ulong)H[k - 1];
+		t[k] = (mp_word)acc;
+		acc >>= 32;
+	}
+	const mp_word finalCarry = (mp_word)acc;                 // 0 or 1
+
+	// value above 2^256 is  O = t[8] + finalCarry*2^32   (proven < 2^33).
+	// pass 2: fold  O*2^256 == O*c == O*977 + O*2^32  into limbs 0..2.
+	const ulong add0 = (ulong)977u * t[MP_WORDS];                     // 977*t8      -> limbs 0,1
+	const ulong add1 = (ulong)t[MP_WORDS] + (ulong)977u * finalCarry; // t8 + 977*fc -> limb 1
+	const ulong add2 = (ulong)finalCarry;                            // fc          -> limb 2
+
+	ulong s, c;
+	s = (ulong)t[0] + (add0 & 0xffffffffu);                              r->d[0] = (mp_word)s; c = s >> 32;
+	s = (ulong)t[1] + (add0 >> 32) + (add1 & 0xffffffffu) + c;           r->d[1] = (mp_word)s; c = s >> 32;
+	s = (ulong)t[2] + (add1 >> 32) + (add2 & 0xffffffffu) + c;           r->d[2] = (mp_word)s; c = s >> 32;
+	for (int i = 3; i < MP_WORDS; ++i) { s = (ulong)t[i] + c;            r->d[i] = (mp_word)s; c = s >> 32; }
+	const mp_word carry2 = (mp_word)c;                               // 0 or 1
+
+	// pass 3: fold that last lone 2^256 through c once more; provably no further carry-out.
+	if (carry2) {
+		s = (ulong)r->d[0] + MP_MOD_C_LO; r->d[0] = (mp_word)s; c = s >> 32;
+		s = (ulong)r->d[1] + 1u + c;      r->d[1] = (mp_word)s; c = s >> 32;
+		for (int i = 2; i < MP_WORDS; ++i) { s = (ulong)r->d[i] + c; r->d[i] = (mp_word)s; c = s >> 32; }
+	}
+}
+
+// -------- PATCH #3: one-shot mod-mul (portable, mul_hi + ulong idiom) --------
+void mp_mod_mul_oneshot_portable(mp_number * const r, const mp_number * const X, const mp_number * const Y) {
+	// STAGE 1: full 512-bit schoolbook product into P[0..15]
+	mp_word P[MP_WORDS * 2];
+	for (int i = 0; i < MP_WORDS * 2; ++i) P[i] = 0;
+	for (int i = 0; i < MP_WORDS; ++i) {
+		ulong carry = 0;
+		for (int j = 0; j < MP_WORDS; ++j) {
+			const ulong tt = (ulong)X->d[i] * Y->d[j] + P[i + j] + carry;
+			P[i + j] = (mp_word)tt;
+			carry = tt >> 32;
+		}
+		P[i + MP_WORDS] = (mp_word)carry;
+	}
+	// STAGE 2: fold high half (P[8..15]) into low half (P[0..7])
+	mp_mod_reduce_fold_portable(r, P, P + MP_WORDS);
+}
+
+// -------- PATCH #6: dedicated mod-sqr (portable) -- same STAGE-1/2 skeleton, symmetric STAGE 1 --------
+void mp_mod_sqr_portable(mp_number * const r, const mp_number * const X) {
+	const mp_word * const a = X->d;
+	// STAGE 1 (symmetric): T = sum_{i<j} a[i]*a[j] (each cross term once, ~28 muls) ...
+	mp_word T[MP_WORDS * 2];
+	for (int i = 0; i < MP_WORDS * 2; ++i) T[i] = 0;
+	for (int i = 0; i < MP_WORDS; ++i) {
+		ulong carry = 0;
+		for (int j = i + 1; j < MP_WORDS; ++j) {
+			const ulong tt = (ulong)a[i] * a[j] + T[i + j] + carry;
+			T[i + j] = (mp_word)tt;
+			carry = tt >> 32;
+		}
+		for (int k = i + MP_WORDS; k < MP_WORDS * 2 && carry; ++k) {
+			const ulong tt = (ulong)T[k] + carry; T[k] = (mp_word)tt; carry = tt >> 32;
+		}
+	}
+	// ... then P = 2*T + diagonal(a[i]^2)   (8 diagonal muls -> ~36 total)
+	mp_word P[MP_WORDS * 2];
+	ulong carry = 0;
+	for (int k = 0; k < MP_WORDS * 2; ++k) { const ulong tt = (ulong)T[k] * 2 + carry; P[k] = (mp_word)tt; carry = tt >> 32; }
+	ulong c = 0;
+	for (int i = 0; i < MP_WORDS; ++i) {
+		const ulong sq = (ulong)a[i] * a[i];
+		ulong s = (ulong)P[2 * i]     + (sq & 0xffffffffu) + c; P[2 * i]     = (mp_word)s; c = s >> 32;
+		s        = (ulong)P[2 * i + 1] + (sq >> 32)         + c; P[2 * i + 1] = (mp_word)s; c = s >> 32;
+	}
+	// STAGE 2: identical fold as mp_mod_mul_oneshot
+	mp_mod_reduce_fold_portable(r, P, P + MP_WORDS);
+}
+
+#ifdef PROFANITY_PTX_MP
+// -------- PATCH #3: one-shot mod-mul (PTX) --------
+// STAGE 1 accumulates the 512-bit product with the GPU-proven mad.lo.cc/madc.hi.cc primitive
+// mp_mul_word_add_extra_ptx (r[0..7] += a[0..7]*w, extra += high word, returns carry-out).
+// The accumulation bookkeeping is validated bit-exact vs the direct product on pocl using the
+// portable twin of the primitive.  STAGE 2 reuses the exact ulong fold above.
+void mp_mod_mul_oneshot_ptx(mp_number * const r, const mp_number * const X, const mp_number * const Y) {
+	mp_word P[MP_WORDS * 2];
+	for (int i = 0; i < MP_WORDS * 2; ++i) P[i] = 0;
+	for (int j = 0; j < MP_WORDS; ++j) {
+		mp_number win;
+		for (int k = 0; k < MP_WORDS; ++k) win.d[k] = P[j + k];   // window = P[j .. j+7]
+		mp_word ex = P[j + MP_WORDS];                            // extra  = P[j+8]
+		mp_word ov = mp_mul_word_add_extra_ptx(&win, X, Y->d[j], &ex);  // += X * Y[j]  (mad chains)
+		for (int k = 0; k < MP_WORDS; ++k) P[j + k] = win.d[k];
+		P[j + MP_WORDS] = ex;
+		for (int k = j + MP_WORDS + 1; k < MP_WORDS * 2 && ov; ++k) {   // ripple carry-out (0/1)
+			const ulong tt = (ulong)P[k] + ov; P[k] = (mp_word)tt; ov = (mp_word)(tt >> 32);
+		}
+	}
+	mp_mod_reduce_fold_portable(r, P, P + MP_WORDS);
+}
+
+// -------- PATCH #6: dedicated mod-sqr (PTX) -- symmetric STAGE 1 via the same primitive --------
+// For each i, MAC  (a with limbs 0..i zeroed) * a[i]  at window offset i: this deposits
+// a[k]*a[i] at limb i+k for every k>i, i.e. exactly the once-counted cross terms sum_{i<j}.
+void mp_mod_sqr_ptx(mp_number * const r, const mp_number * const X) {
+	const mp_word * const a = X->d;
+	mp_word T[MP_WORDS * 2];
+	for (int i = 0; i < MP_WORDS * 2; ++i) T[i] = 0;
+	for (int i = 0; i < MP_WORDS - 1; ++i) {
+		mp_number amask;
+		for (int k = 0; k < MP_WORDS; ++k) amask.d[k] = (k > i) ? a[k] : 0u;   // zero limbs 0..i
+		mp_number win;
+		for (int k = 0; k < MP_WORDS; ++k) win.d[k] = T[i + k];
+		mp_word ex = T[i + MP_WORDS];
+		mp_word ov = mp_mul_word_add_extra_ptx(&win, &amask, a[i], &ex);       // T[i+k] += a[k]*a[i], k>i
+		for (int k = 0; k < MP_WORDS; ++k) T[i + k] = win.d[k];
+		T[i + MP_WORDS] = ex;
+		for (int k = i + MP_WORDS + 1; k < MP_WORDS * 2 && ov; ++k) {
+			const ulong tt = (ulong)T[k] + ov; T[k] = (mp_word)tt; ov = (mp_word)(tt >> 32);
+		}
+	}
+	mp_word P[MP_WORDS * 2];
+	ulong carry = 0;
+	for (int k = 0; k < MP_WORDS * 2; ++k) { const ulong tt = (ulong)T[k] * 2 + carry; P[k] = (mp_word)tt; carry = tt >> 32; }
+	ulong c = 0;
+	for (int i = 0; i < MP_WORDS; ++i) {
+		const ulong sq = (ulong)a[i] * a[i];
+		ulong s = (ulong)P[2 * i]     + (sq & 0xffffffffu) + c; P[2 * i]     = (mp_word)s; c = s >> 32;
+		s        = (ulong)P[2 * i + 1] + (sq >> 32)         + c; P[2 * i + 1] = (mp_word)s; c = s >> 32;
+	}
+	mp_mod_reduce_fold_portable(r, P, P + MP_WORDS);
+}
+#endif
+
+static inline void mp_mod_mul_oneshot(mp_number * const r, const mp_number * const X, const mp_number * const Y) {
+#ifdef PROFANITY_PTX_MP
+	mp_mod_mul_oneshot_ptx(r, X, Y);
+#else
+	mp_mod_mul_oneshot_portable(r, X, Y);
+#endif
+}
+
+static inline void mp_mod_sqr(mp_number * const r, const mp_number * const X) {
+#ifdef PROFANITY_PTX_MP
+	mp_mod_sqr_ptx(r, X);
+#else
+	mp_mod_sqr_portable(r, X);
+#endif
+}
+
 // Modular inversion of a number. 
 void mp_mod_inverse(mp_number * const r) {
 	mp_number A = { { 1 } };
@@ -606,14 +784,14 @@ void point_add(point * const r, point * const p, point * const o) {
 	mp_mod_inverse(&tmp);
 
 	mp_mod_sub(&newX, &o->y, &p->y);
-	mp_mod_mul(&tmp, &tmp, &newX);
+	mp_mod_mul_oneshot(&tmp, &tmp, &newX);   // was mp_mod_mul (orig :417)
 
-	mp_mod_mul(&newX, &tmp, &tmp);
+	mp_mod_sqr(&newX, &tmp);                 // was mp_mod_mul(&newX,&tmp,&tmp) = tmp^2 (orig :419)
 	mp_mod_sub(&newX, &newX, &p->x);
 	mp_mod_sub(&newX, &newX, &o->x);
 
 	mp_mod_sub(&newY, &p->x, &newX);
-	mp_mod_mul(&newY, &newY, &tmp);
+	mp_mod_mul_oneshot(&newY, &newY, &tmp);  // was mp_mod_mul (orig :424)
 	mp_mod_sub(&newY, &newY, &p->y);
 
 	r->x = newX;
@@ -869,7 +1047,7 @@ static inline void profanity_address(const mp_number * const x, const mp_number 
 	h.d[15] = bswap32(y->d[MP_WORDS - 8]);
 	h.d[16] ^= 0x01; // length 64
 
-	sha3_keccakf(&h);
+	sha3_keccakf_eoa(&h);
 
 	// The address is the low 20 bytes of the hash, words 3 through 7.
 	address[0] = h.d[3];
@@ -913,7 +1091,7 @@ static inline void profanity_address(const mp_number * const x, const mp_number 
 		c.q[19] = 0; c.q[20] = 0; c.q[21] = 0; c.q[22] = 0;
 		c.q[23] = 0; c.q[24] = 0;
 
-		sha3_keccakf(&c);
+		sha3_keccakf_contract(&c);
 
 		address[0] = c.d[3];
 		address[1] = c.d[4];
@@ -939,7 +1117,7 @@ static inline void profanity_iterate(mp_number dX, mp_number tmp, __global mp_nu
 	mp_mod_sub(&lambda, &tmp, &lambda);
 
 	// λ² = λ * λ <=> tmp := lambda * lambda = λ²
-	mp_mod_mul(&tmp, &lambda, &lambda);
+	mp_mod_sqr(&tmp, &lambda);
 
 	// d' = λ² - d - 3g = (-3g) - (d - λ²) <=> x := tripleNegativeGx - (x - tmp)
 	mp_mod_sub(&dX, &dX, &tmp);
@@ -950,7 +1128,7 @@ static inline void profanity_iterate(mp_number dX, mp_number tmp, __global mp_nu
 
 	// Calculate y from dX and lambda
 	// y' = (-G_Y) - λ * d' <=> p.y := negativeGy - (p.y * p.x)
-	mp_mod_mul(&tmp, &lambda, &dX);
+	mp_mod_mul_oneshot(&tmp, &lambda, &dX);
 	mp_mod_sub_const(&tmp, &negativeGy, &tmp);
 
 	// Restore X coordinate from delta value
@@ -992,7 +1170,7 @@ static inline void profanity_iterate(mp_number dX, mp_number tmp, __global mp_nu
 	mp_number beta = { {0x719501ee, 0xc1396c28, 0x12f58995, 0x9cf04975, 0xac3434e9, 0x6e64479e, 0x657c0710, 0x7ae96a2b} };
 
 	mp_number betaX;
-	mp_mod_mul(&betaX, &dX, &beta);
+	mp_mod_mul_oneshot(&betaX, &dX, &beta);  // was mp_mod_mul (orig :620)
 
 	profanity_address(&betaX, &tmp, bContract, addresses + 10);
 #endif
@@ -1002,7 +1180,7 @@ static inline void profanity_iterate(mp_number dX, mp_number tmp, __global mp_nu
 #endif
 
 #if PROFANITY_VARIANTS > 4
-	mp_mod_mul(&betaX, &betaX, &beta);
+	mp_mod_mul_oneshot(&betaX, &betaX, &beta); // was mp_mod_mul (orig :630)
 
 	profanity_address(&betaX, &tmp, bContract, addresses + 20);
 #endif
@@ -1714,7 +1892,7 @@ static inline void profanity_create2(__constant const uint * const pTemplate, co
 	h.q[16] = 0; h.q[17] = 0; h.q[18] = 0; h.q[19] = 0; h.q[20] = 0;
 	h.q[21] = 0; h.q[22] = 0; h.q[23] = 0; h.q[24] = 0;
 
-	sha3_keccakf(&h);
+	sha3_keccakf_create2(&h);
 
 	address[0] = h.d[3];
 	address[1] = h.d[4];

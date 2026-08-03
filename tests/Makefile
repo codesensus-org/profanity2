@@ -15,7 +15,7 @@
 
 CC=g++
 CDEFINES=
-EXECUTABLES=test_correctness_pr49.x64 test_correctness_ptx.x64 test_scoring.x64 test_create2.x64 bench_score_matching.x64 bench_mod_mul_pr49.x64 bench_mod_mul_ptx.x64 bench_create2_state.x64 bench_address_state.x64
+EXECUTABLES=test_correctness_pr49.x64 test_correctness_ptx.x64 test_scoring.x64 test_create2.x64 test_correctness_oneshot.x64 test_keccak_equiv.x64 test_keccak_create2_equiv.x64 bench_score_matching.x64 bench_mod_mul_pr49.x64 bench_mod_mul_ptx.x64 bench_create2_state.x64 bench_address_state.x64
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -52,6 +52,15 @@ bench_mod_mul_pr49.x64: bench_mod_mul_pr49.cpp testutil.hpp ../types.hpp ../crea
 # elsewhere they report that there was nothing to compare.
 test_correctness_ptx.x64: test_correctness_ptx.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
 	$(CC) $(CFLAGS) $(CDEFINES) test_correctness_ptx.cpp $(LDFLAGS) -o $@
+
+test_correctness_oneshot.x64: test_correctness_oneshot.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
+	$(CC) $(CFLAGS) $(CDEFINES) test_correctness_oneshot.cpp $(LDFLAGS) -o $@
+
+test_keccak_equiv.x64: test_keccak_equiv.cpp testutil.hpp ../types.hpp
+	$(CC) $(CFLAGS) $(CDEFINES) test_keccak_equiv.cpp $(LDFLAGS) -o $@
+
+test_keccak_create2_equiv.x64: test_keccak_create2_equiv.cpp testutil.hpp ../types.hpp ../create2.hpp
+	$(CC) $(CFLAGS) $(CDEFINES) test_keccak_create2_equiv.cpp $(LDFLAGS) -o $@
 
 bench_mod_mul_ptx.x64: bench_mod_mul_ptx.cpp testutil.hpp ../types.hpp ../create2.hpp ../Mode.hpp
 	$(CC) $(CFLAGS) $(CDEFINES) bench_mod_mul_ptx.cpp $(LDFLAGS) -o $@
