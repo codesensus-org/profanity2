@@ -108,7 +108,7 @@ can make an older card slower than the defaults: two-level inversion at
 **Defaults are portable, not fast.** Out of the box the program runs the safe
 configuration everywhere. The headline numbers need the tuned flags, and the
 right ones vary by card by more than any default could cover — run
-`./autotune.py` once per machine (~20–40 minutes) and use what it prints.
+`./autotune.py` once per machine (~10–20 minutes) and use what it prints.
 
 **Peak throughput costs start-up time.** Large inversion strips make the OpenCL
 compile long: on the 4090, `-S 32` compiles in 73s cold against 34s with
@@ -286,14 +286,27 @@ The performance flags vary by card by more than any default can cover, so
 measure rather than guess:
 
 ```bash
-./autotune.py                 # ~20–40 minutes, prints the flags to use
+./autotune.py                 # ~10–20 minutes, prints the flags to use
+./autotune.py --target create2  # tune the CREATE2 kernel instead, for salt mining
 ./autotune.py --cpu --quick   # a few minutes, to see what it does
 ```
 
-It hill-climbs each flag along a ladder of sensible values and ends by printing
-every chosen value against its neighbours — the evidence that the answer is a
-peak rather than where the search happened to stop. Speeds are in addresses
-per second, so `--variants` counts compare directly.
+It hill-climbs each flag along a ladder of sensible values, probes the coupled
+pairs (`-S`/`-G`, `-i`/`-I`) diagonally for the ridge moves a one-flag-at-a-time
+climb cannot follow, and ends by printing every chosen value against its
+neighbours — the evidence that the answer is a peak rather than where the
+search happened to stop. Measurements are adaptive: the clock starts at each
+run's first speed line so cold kernel compiles cost nothing, clearly slower
+configurations are cut off within seconds, and only near-ties are watched at
+full length. Speeds are in addresses per second, so `--variants` counts
+compare directly.
+
+It closes by measuring the chosen flags against all three hashing targets —
+account, `--contract`, `--create2` — which is where the three speed columns of
+the table above come from. The tune itself aims at the account kernel unless
+`--target` says otherwise; a CREATE2 search iterates salts rather than points,
+ignores `-V` and two-level inversion entirely, and usually wants a much larger
+`-I`, so serious salt mining deserves its own `--target create2` run.
 
 The flags it tunes, briefly (see `./profanity2.x64 --help` for everything):
 
