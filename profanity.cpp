@@ -253,6 +253,7 @@ int main(int argc, char * * argv) {
 		size_t worksizeLocal = 64;
 		size_t worksizeMax = 0; // Will be automatically determined later if not overriden by user
 		bool bNoCache = false;
+		bool bNoScale = false;
 		bool bUseCpu = false;
 		size_t inverseSize = 255;
 		size_t inverseMultiple = 16384;
@@ -283,6 +284,9 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('w', "work", worksizeLocal);
 		argp.addSwitch('W', "work-max", worksizeMax);
 		argp.addSwitch('n', "no-cache", bNoCache);
+		// Leaves a CREATE2 launch exactly the size the flags ask for, which is
+		// how the scaling above was calibrated and how it can be measured again.
+		argp.addSwitch('\0', "no-auto-scale", bNoScale);
 		argp.addSwitch('C', "cpu", bUseCpu);
 		argp.addSwitch('i', "inverse-size", inverseSize);
 		argp.addSwitch('I', "inverse-multiple", inverseMultiple);
@@ -640,6 +644,50 @@ int main(int argc, char * * argv) {
 				fileOut.write(binaries[i].data(), binaries[i].size());
 			}
 			std::cout << "OK" << std::endl;
+		}
+
+		// A CREATE2 search keeps nothing per work item -- its point buffers are
+		// a single element, not one entry each -- so the launch size that -i
+		// and -I describe is a memory budget it never spends. Left alone it
+		// would run the launch an account search can afford, which is far
+		// smaller than the one this path wants: with no inversion and no
+		// points, what is left to amortize is the launch itself, and that
+		// wants as much work inside it as the card can hold.
+		//
+		// So the size is scaled here rather than asked for, which is what lets
+		// one set of flags be right for every target. It is scaled per compute
+		// unit rather than to a fixed number, so the launch lasts about as
+		// long on a small card as on a large one -- long enough that its
+		// overhead is noise, short enough not to look like a hang.
+		// Measured, not assumed: CREATE2 throughput climbs steeply up to about
+		// four million work items, is within a percent of its best by sixteen
+		// million, and is flat from there to a quarter of a billion. That knee
+		// sat in the same place on an RTX 3060, a 4090 and a 5090 -- 28, 128
+		// and 170 compute units -- so it is a property of the launch and not
+		// of the card, and scaling it per compute unit (which an earlier
+		// version of this did) would hand a big card a launch ten times larger
+		// than it has any use for.
+		//
+		// So this is a floor rather than a target. It rescues a launch too
+		// small to fill any GPU -- an --inverse-multiple of 4096 costs a 5090
+		// 15% -- and leaves everything else alone, which includes every size
+		// an account-tuned -I would ever ask for. Nothing here costs memory:
+		// a CREATE2 search allocates one element for its point buffers rather
+		// than one per work item.
+		if (mode.target == CREATE2 && !bNoScale) {
+			const size_t floorItems = size_t(1) << 24;
+			const size_t before = inverseMultiple;
+			while (inverseSize * inverseMultiple < floorItems) {
+				inverseMultiple *= 2;
+			}
+
+			if (inverseMultiple != before) {
+				std::cout << "  CREATE2 pays no memory per work item, and is slow below about sixteen" << std::endl;
+				std::cout << "  million of them, so --inverse-multiple was raised " << before << " -> " << inverseMultiple
+					<< " (" << (inverseSize * inverseMultiple) / 1000000 << "M salts" << std::endl;
+				std::cout << "  per launch). A larger one is kept as given. --no-auto-scale turns this off." << std::endl;
+				std::cout << std::endl;
+			}
 		}
 
 		std::cout << std::endl;
